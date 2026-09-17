@@ -18,6 +18,7 @@ export type APIProvider =
   | "xai"
   | "arli"
   | "zai"
+  | "ionet"
   | "custom"
   | "image_generation"
   | "video_generation"

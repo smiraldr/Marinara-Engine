@@ -22,6 +22,7 @@ export const apiConnections = fileTable("api_connections", {
       "xai",
       "arli",
       "zai",
+      "ionet",
       "custom",
       "image_generation",
       "video_generation",

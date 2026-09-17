@@ -176,6 +176,15 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     usesAuthHeader: true,
     apiKeyHeader: null,
   },
+  ionet: {
+    id: "ionet",
+    name: "IO Intelligence (io.net)",
+    defaultBaseUrl: "https://api.intelligence.io.solutions/api/v1",
+    modelsEndpoint: "/models",
+    supportsStreaming: true,
+    usesAuthHeader: true,
+    apiKeyHeader: null,
+  },
   custom: {
     id: "custom",
     name: "Custom (OAI-Compatible)",
