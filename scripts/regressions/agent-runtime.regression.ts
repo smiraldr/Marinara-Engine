@@ -21,6 +21,7 @@ import {
   type ChatOptions,
 } from "../../packages/server/src/services/llm/base-provider.js";
 import { agentResultTypeSchema } from "../../packages/shared/src/schemas/agent.schema.js";
+import { resolveTrackerRowsUpdate } from "../../packages/shared/src/utils/tracker-updates.js";
 import {
   AGENT_RESULT_TYPE_VALUES,
   type AgentContext,
@@ -204,6 +205,46 @@ const repairedJsonResult = await executeAgent(
 assert.equal(repairedJsonResult.success, true, "structured agents should recover repairable JSON without a retry");
 assert.equal(repairedJsonProvider.calls, 1, "repairable JSON should not spend another model call");
 assert.deepEqual(repairedJsonResult.data, { weather: "rain", nested: { value: 1 } });
+
+// Custom Tracker accepts the same incremental envelope at the root or under fields.
+const trackerUpdates = { updates: [{ name: "Trust", value: "49/100" }], removed: ["Obsolete"] };
+for (const output of [trackerUpdates, { fields: trackerUpdates }]) {
+  const result = await executeAgent(
+    makeAgent("custom-tracker", "custom_tracker_update"),
+    context,
+    new RecordingProvider(JSON.stringify({ ...output, reasoning: "A new milestone." })),
+    "agent-model",
+  );
+  assert.equal(result.success, true);
+  const data = result.data as Record<string, unknown>;
+  assert.equal(data.reasoning, "A new milestone.");
+  assert.deepEqual(
+    resolveTrackerRowsUpdate(data.fields, [
+      { name: "Trust", value: "48/100", description: "Keep this detail" },
+      { name: "Energy", value: "80/100" },
+      { name: "Obsolete", value: "old" },
+    ]),
+    [
+      { name: "Trust", value: "49/100", description: "Keep this detail" },
+      { name: "Energy", value: "80/100" },
+    ],
+    "top-level incremental output must reach the existing row merge without losing omitted values",
+  );
+}
+for (const output of [
+  { fields: [{ name: "Trust", value: "49/100" }] },
+  { fields: [], ...trackerUpdates },
+  { updates: "invalid" },
+  {},
+]) {
+  const result = await executeAgent(
+    makeAgent("custom-tracker", "custom_tracker_update"),
+    context,
+    new RecordingProvider(JSON.stringify(output)),
+    "agent-model",
+  );
+  assert.deepEqual(result.data, output, "explicit fields and invalid/empty envelopes retain their meaning");
+}
 
 const invalidJsonProvider = new RecordingProvider("not JSON at all");
 const invalidJsonResult = await executeAgent(
@@ -651,5 +692,23 @@ assert.deepEqual(
   ["--parallel", "4", "--ctx-size", "32768"],
   "local parallel slots should preserve the configured context budget per request",
 );
+
+for (const batchSize of [512, 4096, 32768]) {
+  const args = buildLlamaArgs({
+    modelPath: "gemma-4-E2B-it-Q8_0.gguf",
+    gpuLayers: 999,
+    port: 10_019,
+    contextSize: 32768,
+    runtimeVariant: "win-x64-hip",
+    enableNativeToolCalls: true,
+    embeddingPooling: "mean",
+    embeddingBatchSize: batchSize,
+    maxParallelJobs: 2,
+  });
+  const logicalBatch = Number(args[args.indexOf("--batch-size") + 1]);
+  const physicalBatch = Number(args[args.indexOf("--ubatch-size") + 1]);
+  assert.equal(physicalBatch, batchSize);
+  assert.equal(logicalBatch, Math.max(2048, batchSize), "logical batch must not silently cap configured embeddings");
+}
 
 console.log("Agent runtime regression checks passed.");

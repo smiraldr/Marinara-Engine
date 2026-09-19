@@ -33,9 +33,7 @@ export function CombatStyleSection({ style, combatStyle, onCombatStyleChange }: 
             <option value="classic">
               {localizeUi("ui.chatSettings.combatstylesection.classicCinematicMenuBattles")}
             </option>
-            <option value="tactical">
-              {localizeUi("ui.chatSettings.combatstylesection.tacticalFireEmblemStyleGridBattles")}
-            </option>
+            <option value="tactical">{localizeUi("game.combat.preference.tacticalLabel")}</option>
           </select>
         </label>
         <p className="text-[0.575rem] leading-relaxed text-[var(--muted-foreground)]">

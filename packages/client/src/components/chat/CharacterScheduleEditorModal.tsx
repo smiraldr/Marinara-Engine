@@ -185,8 +185,7 @@ function parseOptionalNumber(value: string, min: number, max: number): number | 
 function parseOptionalCap(value: string): number | null {
   if (!value.trim()) return null;
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return null;
-  return Math.max(1, Math.min(8, Math.floor(parsed)));
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
 }
 
 function parseClock(value: string | undefined): number | null {
@@ -474,7 +473,14 @@ export function CharacterScheduleEditorModal({
         ? "Basic check-ins only"
         : `${enabledMomentCount} moments on`;
 
+  const validateDailyCap = (value = draft.autonomousDailyCapOverride) => {
+    if (!value.trim() || parseOptionalCap(value) !== null) return true;
+    toast.error(localizeUi("ui.chat.characterscheduleeditormodal.dailySafetyLimitInvalid"));
+    return false;
+  };
+
   const generateSummary = async () => {
+    if (!validateDailyCap()) return;
     setIsGeneratingSummary(true);
     try {
       const result = await api.post<RoutineSummaryResponse>("/conversation/schedule/summary", {
@@ -488,6 +494,7 @@ export function CharacterScheduleEditorModal({
         routineSummary: result.summary,
         routineSummaryGeneratedAt: result.generatedAt,
       };
+      if (!validateDailyCap(nextDraft.autonomousDailyCapOverride)) return;
       draftRef.current = nextDraft;
       setDraft(nextDraft);
       onSave(characterId, draftToSchedule(nextDraft, schedule));
@@ -504,6 +511,7 @@ export function CharacterScheduleEditorModal({
   };
 
   const generateWeek = async () => {
+    if (!validateDailyCap()) return;
     setIsGeneratingWeek(true);
     try {
       const result = await api.post<DraftScheduleResponse>("/conversation/schedule/draft", {
@@ -533,6 +541,7 @@ export function CharacterScheduleEditorModal({
   };
 
   const generateDay = async (day: string) => {
+    if (!validateDailyCap()) return;
     setGeneratingDay(day);
     setDayGenerationStatus((current) => ({ ...current, [day]: `Regenerating ${day}...` }));
     const previousBlocks = draft.days[day] ?? [];
@@ -579,11 +588,13 @@ export function CharacterScheduleEditorModal({
   };
 
   const save = () => {
+    if (!validateDailyCap()) return;
     onSave(characterId, currentSchedule);
     onClose();
   };
 
   const exportSchedule = () => {
+    if (!validateDailyCap()) return;
     downloadJsonFile(
       createCharacterScheduleExport(currentSchedule, characterName),
       `${sanitizeExportFilenamePart(characterName, "character")}.marinara-schedule.json`,
@@ -827,18 +838,15 @@ export function CharacterScheduleEditorModal({
                   <span className="font-medium">
                     {localizeUi("ui.chat.characterscheduleeditormodal.dailySafetyLimit")}
                   </span>
-                  <select
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
                     value={draft.autonomousDailyCapOverride}
+                    placeholder={localizeUi("ui.noodle.noodlehome.default")}
                     onChange={(event) => updateSetting("autonomousDailyCapOverride", event.target.value)}
                     className="w-full rounded-md bg-[var(--secondary)] px-3 py-2 outline-none ring-1 ring-[var(--border)] focus:ring-[var(--primary)]/50"
-                  >
-                    <option value="">{localizeUi("ui.noodle.noodlehome.default")}</option>
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((cap) => (
-                      <option key={cap} value={cap}>
-                        {cap} {localizeUi("ui.chat.characterscheduleeditormodal.day")}
-                      </option>
-                    ))}
-                  </select>
+                  />
                   <div className="text-[0.6875rem] text-[var(--muted-foreground)]">
                     {localizeUi("ui.chat.characterscheduleeditormodal.hardMaximumPerDayUsuallyLeaveThisOnDefault")}
                   </div>

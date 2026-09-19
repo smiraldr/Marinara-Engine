@@ -1,3 +1,4 @@
+import { assignCombatTactics, combatTacticsSchema } from "@marinara-engine/shared";
 // ──────────────────────────────────────────────
 // Game: Main Surface (rendered by ChatArea when mode === "game")
 // ──────────────────────────────────────────────
@@ -78,6 +79,7 @@ import {
 import { useConnections } from "../../hooks/use-connections";
 import { useAgentConfigs } from "../../hooks/use-agents";
 import {
+  rulesetCatalogQuery,
   selectGameExperiencePackages,
   useCapabilityClientModuleState,
   useInstalledCapabilityPackages,
@@ -104,6 +106,7 @@ import { gameAssetFileUrl } from "../../lib/game-asset-urls";
 import { audioManager } from "../../lib/game-audio";
 import {
   parseGmTags,
+  resolveMessageWeatherAction,
   parseSegmentInventoryUpdates,
   type CombatEncounterTag,
   type ElementAttackTag,
@@ -117,6 +120,12 @@ import { resolveCombatFullBodyPose, resolveDialogueFullBodyPose } from "../../li
 import { characterNamesMatch, findNamedEntry } from "../../lib/game-character-name-match";
 import { normalizeGameSegmentEdit, serializeGameSegmentEdit, type GameSegmentEdit } from "../../lib/game-segment-edits";
 import { findReplayStoryboardKeyframe } from "../../lib/game-storyboard-keyframes";
+import {
+  applyRulesetBattleResult,
+  rulesetBattleCatalogIds,
+  seedRulesetBattleParty,
+  type RulesetCombatSeeds,
+} from "../../lib/ruleset-combat-bridge";
 import { useSceneAnalysis } from "../../hooks/use-scene-analysis";
 import { useTTSConfig } from "../../hooks/use-tts";
 import { useSidecarStore } from "../../stores/sidecar.store";
@@ -173,6 +182,12 @@ import {
   validateTacticalBattlefieldBrief,
   type MusicEnemyTier,
   scoreAmbient,
+  normalizeCharacterLookupName,
+  rulesetSheetEnvelopeSchema,
+  type RulesetCatalogEntriesById,
+  type RulesetCatalogPayload,
+  type RulesetLiveState,
+  type RulesetSheetEnvelope,
 } from "@marinara-engine/shared";
 import { GameNarration } from "./GameNarration";
 import { formatNarration } from "./game-narration-format";
@@ -180,7 +195,10 @@ import { GameInput } from "./GameInput";
 import { GameMapPanel, MobileMapButton } from "./GameMap";
 import { GamePartyBar } from "./GamePartyBar";
 import { GameCharacterSheet } from "@/components/game/GameCharacterSheet";
-import type { GameCharacterSheetGameCard } from "@/components/game/GameCharacterSheet";
+import type { GameCharacterSheetGameCard, GameCharacterSheetRuleset } from "@/components/game/GameCharacterSheet";
+import { describeRefusedSheetCommands } from "./GameRulesetSheet";
+import { useGameRuleset } from "../../hooks/use-game-ruleset";
+import { useGameStatePatcher } from "../../hooks/use-game-state-patcher";
 import { GameDiceResult } from "./GameDiceResult";
 import { GameSkillCheckResult } from "./GameSkillCheckResult";
 import { GameElementReaction } from "./GameElementReaction";
@@ -965,12 +983,22 @@ function combatSkillsFromGeneratedAttacks(
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const description = attack.description || (attack.type === "AoE" ? "Area combat ability" : "Combat ability");
-    const type = inferCombatSkillType(`${name} ${description} ${attack.statusEffect ?? ""}`);
+    const type = attack.kind ?? inferCombatSkillType(`${name} ${description} ${attack.statusEffect ?? ""}`);
     skills.push({
       id,
       name,
       type,
-      mpCost: Math.max(4, Math.min(18, 5 + level)),
+      areaRadius: attack.areaRadius,
+      friendlyFire: attack.friendlyFire,
+      targetScope: attack.targetScope,
+      spell: attack.spell,
+      projectile: attack.projectile,
+      requiresSight: attack.requiresSight,
+      reaction: attack.reaction,
+      range: attack.range,
+      slotLevel: attack.slotLevel,
+      legendaryCost: attack.legendaryCost,
+      mpCost: attack.mpCost ?? Math.max(4, Math.min(18, 5 + level)),
       power:
         typeof attack.power === "number" && Number.isFinite(attack.power)
           ? Math.max(0.5, Math.min(3, attack.power))
@@ -1013,7 +1041,8 @@ function isValidCombatant(value: unknown): value is Combatant {
     typeof v.defense === "number" &&
     typeof v.speed === "number" &&
     typeof v.level === "number" &&
-    (v.side === "player" || v.side === "enemy")
+    (v.side === "player" || v.side === "enemy") &&
+    (v.tactics === undefined || combatTacticsSchema.safeParse(v.tactics).success)
   );
 }
 
@@ -1039,6 +1068,10 @@ export function generatedPartyMemberToCombatant(
   const combatClass = typeof member.class === "string" && member.class.trim() ? member.class.trim() : undefined;
   const movementMode = normalizeCombatMovementMode(member.movementMode);
   return {
+    aiHints: member.aiHints,
+    projectile: member.projectile,
+    requiresSight: member.requiresSight,
+    spellSlots: member.spellSlots,
     id: matchedAvatar?.id ?? `generated-party-${index}-${slugifyCombatantId(member.name)}`,
     name: member.name || `Ally ${index + 1}`,
     hp,
@@ -1052,7 +1085,13 @@ export function generatedPartyMemberToCombatant(
     side: "player",
     sprite: matchedAvatar?.avatarUrl ?? undefined,
     statusEffects: combatStatusEffectsFromGenerated(member.statuses),
-    skills: combatSkillsFromSheet(gameCard?.abilities) ?? combatSkillsFromGeneratedAttacks(member.attacks, level),
+    skills:
+      combatSkillsFromSheet(gameCard?.abilities)?.map((skill) => ({
+        ...skill,
+        ...combatSkillsFromGeneratedAttacks(member.attacks, level)?.find(
+          (generated) => generated.name.trim().toLowerCase() === skill.name.trim().toLowerCase(),
+        ),
+      })) ?? combatSkillsFromGeneratedAttacks(member.attacks, level),
     element,
     combatClass,
     movementMode,
@@ -1083,6 +1122,13 @@ export function generatedEnemyToCombatant(enemy: CombatEnemy, index: number, fal
   const combatClass = typeof enemy.class === "string" && enemy.class.trim() ? enemy.class.trim() : undefined;
   const movementMode = normalizeCombatMovementMode(enemy.movementMode);
   return {
+    aiHints: enemy.aiHints,
+    projectile: enemy.projectile,
+    requiresSight: enemy.requiresSight,
+    boss: enemy.boss,
+    spellSlots: enemy.spellSlots,
+    mp: enemy.mp ?? enemy.maxMp ?? 20 + level * 3,
+    maxMp: enemy.maxMp ?? enemy.mp ?? 20 + level * 3,
     id: `generated-enemy-${index}-${slugifyCombatantId(enemy.name)}`,
     name: enemy.name || `Enemy ${index + 1}`,
     hp,
@@ -1524,6 +1570,8 @@ const GameAssetsBrowserView = lazy(async () => {
   const module = await import("../game-assets/GameAssetsBrowserView");
   return { default: module.GameAssetsBrowserView };
 });
+
+const DirectedCombatUI = lazy(() => import("./DirectedCombatUI").then((m) => ({ default: m.DirectedCombatUI })));
 
 const GameCombatUI = lazy(async () => {
   const module = await import("./GameCombatUI");
@@ -4622,6 +4670,25 @@ function GameSurfaceComponent({
     api.patch(`/chats/${chatId}/metadata`, { gameCombatState: null, gameTacticalCombatSnapshot: null }).catch(() => {});
   }, []);
 
+  const combatRestoredChatIdRef = useRef<string | null>(null);
+  // Reset before restoration: resetting afterward erased the restored encounter anchor and mechanics.
+  useEffect(() => {
+    setPendingMapMove(null);
+    setViewedMapId(null);
+    combatRestoredChatIdRef.current = null;
+    setCombatStartMessageId(null);
+    setQueuedCombatGeneration(null);
+    // #5094: abandon any in-flight combat generation here — clear the lock so a fresh request isn't
+    // blocked by it, and bump the request id so the old generation's stale completion can't re-queue
+    // combat, apply state, or set an error against the reset combat state.
+    combatGenerationInFlightRef.current = false;
+    combatGenerationRequestIdRef.current += 1;
+    setCombatGenerationPending(false);
+    setCombatItemEffects([]);
+    setCombatMechanics([]);
+    setCombatDialogueCues([]);
+  }, [activeChatId]);
+
   // ── Restore in-progress combat state from chat metadata on page load ──
   // Without this, refreshing during a fight drops the user back into prose narration even
   // though gameActiveState is still "combat", because the live party/enemy snapshot only
@@ -4629,7 +4696,6 @@ function GameSurfaceComponent({
   // Scoped per-chat so switching to another chat in the same mounted GameSurface still
   // gets a chance to restore that chat's snapshot — a single boolean would permanently
   // skip restore after the first chat opened.
-  const combatRestoredChatIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (isMessagesLoading) return;
     if (combatRestoredChatIdRef.current === activeChatId) return;
@@ -4931,9 +4997,9 @@ function GameSurfaceComponent({
     if (!latestAssistantMsg?.content || isStreaming) return;
     if (latestAssistantDirectAddressMode) return;
     if (weatherMsgRef.current === latestAssistantMsg.id) return;
+    const action = resolveMessageWeatherAction(gameState, latestAssistantMsg.content);
+    if (!action) return;
     weatherMsgRef.current = latestAssistantMsg.id;
-    // Map game state to weather action for probabilistic change
-    const action = gameState === "travel_rest" ? "travel" : gameState === "exploration" ? "explore" : "turn";
     updateWeather.mutate({ chatId: activeChatId, action, location: gameSnapshot?.location ?? "" });
   }, [
     latestAssistantMsg?.content,
@@ -5071,6 +5137,7 @@ function GameSurfaceComponent({
                     advantage: sc.advantage,
                     disadvantage: sc.disadvantage,
                     preRolledD20: sc.preRolledD20,
+                    who: sc.who,
                     messageId: msg.id,
                   })
                 ).result
@@ -5161,6 +5228,11 @@ function GameSurfaceComponent({
         transitionGameState.mutate({ chatId: activeChatId, newState: next });
       }
     }
+
+    // Sheet changes the Engine refused. The narration can still read as though the spend
+    // happened, so the player is told once per turn what did not take effect.
+    const refusedSheetCommands = describeRefusedSheetCommands(msg.content, localizeUi);
+    if (refusedSheetCommands) toast.warning(refusedSheetCommands);
 
     // NPC reputation actions from inline [reputation:] tags
     if (tags.reputationActions.length > 0) {
@@ -8430,6 +8502,128 @@ function GameSurfaceComponent({
     ];
   }, [combatEnemies, combatParty]);
 
+  // ── Battles on a ruleset sheet ──
+  // A ruleset that opted in with a `battle` block lends the fight the sheet's own health, energy
+  // and slots, and turns the catalog rows the sheet carries into skills. Health travels as a share
+  // of the maximum, because the damage is still Marinara's and the two scales are nothing alike,
+  // which is what the notice says out loud. A game with no ruleset, or one whose ruleset has no
+  // block, never reaches any of this.
+  const gameRuleset = useGameRuleset(chatMeta);
+  /** What each seeded member started this battle with, keyed the way live state is. Null while this
+   *  session has not seeded a battle, which is what a battle restored after a reload looks like. */
+  const rulesetBattleSeedsRef = useRef<RulesetCombatSeeds | null>(null);
+  // A battle restored in another chat must never be measured against the seeds of the one left
+  // behind: two games can field characters with the same name.
+  useEffect(() => {
+    rulesetBattleSeedsRef.current = null;
+  }, [activeChatId]);
+
+  // The catalogs a bridged battle reads are fetched as soon as the game is open, so that starting a
+  // battle finds them in the cache and seeds the party in the same tick a game without a ruleset
+  // sets it. Nothing is fetched for a game whose ruleset has no `battle` block.
+  const battleDefinition = gameRuleset.status === "ok" && gameRuleset.definition.battle ? gameRuleset.definition : null;
+  useEffect(() => {
+    if (!battleDefinition) return;
+    for (const catalogId of rulesetBattleCatalogIds(battleDefinition)) {
+      void queryClient.prefetchQuery(rulesetCatalogQuery(battleDefinition.id, catalogId, battleDefinition.version));
+    }
+  }, [battleDefinition, queryClient]);
+
+  const startBattleParty = useCallback(
+    (party: Combatant[], apply: (party: Combatant[]) => void) => {
+      const definition = gameRuleset.status === "ok" ? gameRuleset.definition : null;
+      if (!definition?.battle) {
+        apply(party);
+        return;
+      }
+      const cards = chatMeta.gameCharacterCards;
+      const chatId = activeChatIdRef.current;
+      // Read at battle time, not at render time: a turn's own sheet commands may have landed since
+      // this callback was built, and the fight has to start from what they left behind. A snapshot
+      // that belongs to another chat is not this game's live state, and seeding from nothing would
+      // start everybody at full, so the bridge simply stands aside for this fight.
+      const snapshot = useGameStateStore.getState().current;
+      if (snapshot?.chatId !== chatId) {
+        console.warn("[game-ruleset] Game state was not ready, so this battle does not use the sheets");
+        // An EMPTY record, not null: nobody was seeded, so nobody is written back. Null would send
+        // the write-back down its reload path, which measures the end of the fight against the
+        // sheet's share, and these fighters started at full instead.
+        rulesetBattleSeedsRef.current = {};
+        apply(party);
+        return;
+      }
+      const live = snapshot.rulesetLive;
+      const playerName = personaInfo?.name;
+      const start = (catalogs: RulesetCatalogEntriesById) => {
+        const seeded = seedRulesetBattleParty(definition, cards, live, catalogs, party, playerName);
+        rulesetBattleSeedsRef.current = seeded.seeds;
+        if (Object.keys(seeded.seeds).length > 0) {
+          toast.info(localizeUi("game.ruleset.battle.sheetNotice", { ruleset: definition.name }));
+        }
+        apply(seeded.party);
+      };
+      // The usual case: the catalogs were fetched when the game opened, so the party is seeded and
+      // set right here, in the same tick as the enemies and the scene around it.
+      const catalogIds = rulesetBattleCatalogIds(definition);
+      const cached: RulesetCatalogEntriesById = {};
+      for (const catalogId of catalogIds) {
+        const payload = queryClient.getQueryData<RulesetCatalogPayload>(
+          rulesetCatalogQuery(definition.id, catalogId, definition.version).queryKey,
+        );
+        if (payload) cached[catalogId] = payload.entries;
+      }
+      if (Object.keys(cached).length === catalogIds.length) {
+        start(cached);
+        return;
+      }
+      // The slow path, for a battle that starts before the catalogs have arrived. The empty record
+      // marks this battle as started by this session; every place that ends or abandons a battle
+      // replaces it, which is how a late answer knows it has been overtaken.
+      const pending: RulesetCombatSeeds = {};
+      rulesetBattleSeedsRef.current = pending;
+      // The wait is shown and gated the way a battle still being generated is: the same "starting"
+      // state holds the narration and the input until the party is in place.
+      setCombatGenerationPending(true);
+      let applied = false;
+      void (async () => {
+        const catalogs: RulesetCatalogEntriesById = {};
+        const missing: string[] = [];
+        await Promise.all(
+          rulesetBattleCatalogIds(definition).map(async (catalogId) => {
+            try {
+              const payload = await queryClient.fetchQuery(
+                rulesetCatalogQuery(definition.id, catalogId, definition.version),
+              );
+              catalogs[catalogId] = payload.entries;
+            } catch {
+              missing.push(catalogId);
+            }
+          }),
+        );
+        // A catalog that will not load costs the skills it holds and nothing else: the fight still
+        // starts on the sheet's own hit points and slots rather than not starting at all.
+        if (missing.length > 0) {
+          console.warn("[game-ruleset] Battle skills were skipped: these catalogs did not load", missing);
+        }
+        // A chat switch while the catalogs were in flight abandons this battle with them, and so
+        // does a battle the player already backed out of: the party must not be set on a game
+        // that is no longer fighting. The combat screen only mounts once the party is set, so
+        // nothing was playable in the meantime.
+        if (activeChatIdRef.current !== chatId) return;
+        if (rulesetBattleSeedsRef.current !== pending) return;
+        start(catalogs);
+        applied = true;
+      })().finally(() => {
+        // Only the battle that raised the gate lowers it, and only while it is still that battle's:
+        // a chat switch resets the gate by its own means, and a battle that replaced this one owns
+        // the gate it raised.
+        if (activeChatIdRef.current !== chatId) return;
+        if (applied || rulesetBattleSeedsRef.current === pending) setCombatGenerationPending(false);
+      });
+    },
+    [chatMeta.gameCharacterCards, gameRuleset, localizeUi, personaInfo?.name, queryClient],
+  );
+
   const hydrateGeneratedCombatState = useCallback(
     (combatState: CombatInitState): { party: Combatant[]; enemies: Combatant[] } | null => {
       const fallbackLevel = sessionNumber ?? 5;
@@ -8452,7 +8646,11 @@ function GameSurfaceComponent({
         : [];
 
       if (partyCombatants.length === 0 || enemyCombatants.length === 0) return null;
-      return { party: partyCombatants, enemies: enemyCombatants };
+      const seed = Math.floor(Math.random() * 0x100000000);
+      return {
+        party: partyCombatants.map((c) => ({ ...c, tactics: assignCombatTactics(c, seed) })),
+        enemies: enemyCombatants.map((c) => ({ ...c, tactics: assignCombatTactics(c, seed) })),
+      };
     },
     [chatMeta.gameCharacterCards, combatAvatarCandidates, sessionNumber],
   );
@@ -8769,7 +8967,7 @@ function GameSurfaceComponent({
     if (isStreaming || scenePreparing || assetGenerationBlocksScene || directionsPlaying) return;
     if (latestNarrationText && !narrationDone) return;
 
-    setCombatParty(preparedCombatState.party);
+    startBattleParty(preparedCombatState.party, setCombatParty);
     setCombatEnemies(preparedCombatState.enemies);
     setCombatItemEffects(preparedCombatState.itemEffects);
     setCombatMechanics(preparedCombatState.mechanics);
@@ -8803,6 +9001,7 @@ function GameSurfaceComponent({
     preparedCombatState,
     queuedCombatGeneration,
     scenePreparing,
+    startBattleParty,
     transitionGameState,
   ]);
 
@@ -9135,7 +9334,9 @@ function GameSurfaceComponent({
       side: "enemy" as const,
       element: e.element,
     }));
-    setCombatEnemies(enemyCombatants);
+    setCombatEnemies(
+      enemyCombatants.map((c) => ({ ...c, tactics: assignCombatTactics(c, Math.floor(Math.random() * 0x100000000)) })),
+    );
 
     const playerMembers = partyMembers.filter((member) => member.id.startsWith("persona:"));
     const npcByPartyId = buildPartyNpcLookup(npcs, chatMeta.gameNpcs);
@@ -9288,7 +9489,10 @@ function GameSurfaceComponent({
       return;
     }
 
-    setCombatParty(partyCombatants);
+    startBattleParty(
+      partyCombatants.map((c) => ({ ...c, tactics: assignCombatTactics(c, Math.floor(Math.random() * 0x100000000)) })),
+      setCombatParty,
+    );
   }, [
     pendingEncounter,
     partyMembers,
@@ -9299,6 +9503,7 @@ function GameSurfaceComponent({
     characters,
     characterMap,
     npcs,
+    startBattleParty,
     transitionGameState,
     sessionNumber,
   ]);
@@ -9537,7 +9742,10 @@ function GameSurfaceComponent({
       const updatedCards = [...currentCards];
       if (sanitizedGameCard) {
         if (currentIndex >= 0) {
-          updatedCards[currentIndex] = sanitizedGameCard;
+          // This editor only knows the fields above. The game's copy of the ruleset sheet lives on
+          // the same card and is edited elsewhere, so it rides along instead of being dropped.
+          const rulesetSheet = currentCards[currentIndex]?.rulesetSheet;
+          updatedCards[currentIndex] = rulesetSheet ? { ...sanitizedGameCard, rulesetSheet } : sanitizedGameCard;
         } else {
           updatedCards.push(sanitizedGameCard);
         }
@@ -9561,6 +9769,112 @@ function GameSurfaceComponent({
     },
     [activeChatId, chatMeta.gameCharacterCards, updateChatMetadata, localizeUi],
   );
+
+  // ── Ruleset sheets ──
+  // A game that pinned a ruleset carries a per-card BUILD on `gameCharacterCards[].rulesetSheet`
+  // and LIVE state in the game-state snapshot, so a swipe rewinds what was spent. The resolution
+  // itself (`gameRuleset`) is read further up, where battles start.
+  const { patchField: patchGameStateField } = useGameStatePatcher(activeChatId, "game-ruleset-sheet");
+
+  /** The stored card for a party card's title, matched exactly as `handleSaveCharacterSheet` does. */
+  const findStoredGameCard = useCallback(
+    (cardTitle: string) => {
+      const cards = Array.isArray(chatMeta.gameCharacterCards)
+        ? (chatMeta.gameCharacterCards as Array<Record<string, unknown>>)
+        : [];
+      const wanted = cardTitle.trim().toLowerCase();
+      return {
+        cards,
+        index: cards.findIndex((entry) => typeof entry.name === "string" && entry.name.toLowerCase() === wanted),
+      };
+    },
+    [chatMeta.gameCharacterCards],
+  );
+
+  const handleSaveRulesetSheet = useCallback(
+    async (cardTitle: string, envelope: RulesetSheetEnvelope) => {
+      // Every path that does not save REJECTS, so the sheet keeps the draft instead of closing the
+      // editor on edits that went nowhere.
+      if (!activeChatId) {
+        const message = localizeUi("game.ruleset.sheet.saveFailed", { name: cardTitle });
+        toast.error(message);
+        throw new Error(message);
+      }
+      const { cards, index } = findStoredGameCard(cardTitle);
+      // Sheets belong to cards the game already made. Creating one here would invent a party
+      // member, so an unmatched name is reported instead.
+      if (index < 0) {
+        const message = localizeUi("game.ruleset.sheet.noCard", { name: cardTitle });
+        toast.error(message);
+        throw new Error(message);
+      }
+      // Only `rulesetSheet` is touched: every other field on the card is the legacy editor's.
+      const updatedCards = cards.map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, rulesetSheet: envelope } : entry,
+      );
+      try {
+        await updateChatMetadata.mutateAsync({ id: activeChatId, gameCharacterCards: updatedCards });
+        toast.success(localizeUi("game.ruleset.sheet.saved", { name: cardTitle }));
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : localizeUi("game.ruleset.sheet.saveFailed", { name: cardTitle }),
+        );
+        throw error;
+      }
+    },
+    [activeChatId, findStoredGameCard, localizeUi, updateChatMetadata],
+  );
+
+  const handleRulesetLiveChange = useCallback(
+    (cardTitle: string, next: RulesetLiveState) => {
+      if (!activeChatId) return;
+      const key = normalizeCharacterLookupName(cardTitle);
+      if (!key) return;
+      // Read the snapshot at click time, not at render time: a turn's own sheet commands may have
+      // landed since this sheet was rendered, and they must not be written back out.
+      const current = useGameStateStore.getState().current;
+      // The patch replaces the WHOLE live object. Built from a snapshot that is missing, or that
+      // belongs to another chat, it would wipe every other character's state, so the edit is
+      // refused and said out loud instead.
+      if (current?.chatId !== activeChatId) {
+        toast.error(localizeUi("game.ruleset.sheet.stateNotReady"));
+        return;
+      }
+      const { [key]: _previous, ...others } = current.rulesetLive ?? {};
+      // The shared op normalises an untouched sheet back to `{}`; storing that would keep an empty
+      // entry per character forever.
+      patchGameStateField("rulesetLive", Object.keys(next).length > 0 ? { ...others, [key]: next } : others);
+    },
+    [activeChatId, localizeUi, patchGameStateField],
+  );
+
+  const characterSheetRuleset = useMemo<GameCharacterSheetRuleset | undefined>(() => {
+    if (gameRuleset.status === "none" || gameRuleset.status === "loading") return undefined;
+    if (gameRuleset.status === "unavailable") return { status: "unavailable" };
+    const cardTitle = characterSheetCharId ? partyCards[characterSheetCharId]?.title : undefined;
+    if (!cardTitle) return undefined;
+    const { cards, index } = findStoredGameCard(cardTitle);
+    // A stored sheet this version cannot read is kept as it is. Showing the ruleset's defaults in
+    // its place would invite a Save that overwrites it, so the block says so and offers nothing.
+    const parsed = index >= 0 ? rulesetSheetEnvelopeSchema.safeParse(cards[index]?.rulesetSheet) : null;
+    if (parsed && !parsed.success && cards[index]?.rulesetSheet != null) return { status: "unreadable" };
+    return {
+      status: "ok",
+      definition: gameRuleset.definition,
+      envelope: parsed?.success ? parsed.data : undefined,
+      live: gameSnapshot?.rulesetLive?.[normalizeCharacterLookupName(cardTitle)],
+      onLiveChange: (next) => handleRulesetLiveChange(cardTitle, next),
+      onEnvelopeSave: (next) => handleSaveRulesetSheet(cardTitle, next),
+    };
+  }, [
+    characterSheetCharId,
+    findStoredGameCard,
+    gameRuleset,
+    gameSnapshot?.rulesetLive,
+    handleRulesetLiveChange,
+    handleSaveRulesetSheet,
+    partyCards,
+  ]);
 
   // Keep the last settled transcript visible until generation and its scene/agent
   // pipeline are finished. Query refreshes may expose the durable assistant row
@@ -10039,22 +10353,6 @@ function GameSurfaceComponent({
   );
 
   useEffect(() => {
-    setPendingMapMove(null);
-    setViewedMapId(null);
-    setCombatStartMessageId(null);
-    setQueuedCombatGeneration(null);
-    // #5094: abandon any in-flight combat generation here — clear the lock so a fresh request isn't
-    // blocked by it, and bump the request id so the old generation's stale completion can't re-queue
-    // combat, apply state, or set an error against the reset combat state.
-    combatGenerationInFlightRef.current = false;
-    combatGenerationRequestIdRef.current += 1;
-    setCombatGenerationPending(false);
-    setCombatItemEffects([]);
-    setCombatMechanics([]);
-    setCombatDialogueCues([]);
-  }, [activeChatId]);
-
-  useEffect(() => {
     if (!viewedMapId) return;
     const exists = availableMaps.some((map, index) => getGameMapId(map, index) === viewedMapId);
     if (!exists) setViewedMapId(null);
@@ -10191,6 +10489,8 @@ function GameSurfaceComponent({
     setCombatStartMessageId(null);
     appliedCombatStatusMessageIdsRef.current.clear();
     appliedCombatElementMessageIdsRef.current.clear();
+    // The fight is being undone, so nothing is written to the sheets and nothing is remembered.
+    rulesetBattleSeedsRef.current = null;
     useGameModeStore.getState().setGameState("exploration");
     if (activeChatId) {
       transitionGameState.mutate({ chatId: activeChatId, newState: "exploration" });
@@ -10244,6 +10544,46 @@ function GameSurfaceComponent({
         clearCombatSnapshot(activeChatId);
       }
 
+      // Tell the sheets what the fight cost, before the recap goes out, so the Game Master's next
+      // turn and the sheet on screen agree about what is left. A battle abandoned without ending
+      // (the empty-party guard, deleting the turn that started it) never reaches here and writes
+      // nothing back, because that fight did not happen.
+      const rulesetDefinition = gameRuleset.status === "ok" ? gameRuleset.definition : null;
+      // Plain English, like every other line of the recap: it is a prompt, not UI copy.
+      let sheetRecapLine: string | null = null;
+      if (rulesetDefinition?.battle) {
+        const current = useGameStateStore.getState().current;
+        // The patch replaces the WHOLE live object, so a snapshot that is missing or belongs to
+        // another chat would wipe every character's state. `handleRulesetLiveChange` refuses on
+        // exactly the same test; here the fight is already over, so it is said to the console.
+        if (current?.chatId !== activeChatId) {
+          console.warn("[game-ruleset] Game state was not ready, so the battle was not written to the sheets");
+        } else {
+          const written = applyRulesetBattleResult(
+            rulesetDefinition,
+            chatMeta.gameCharacterCards,
+            current.rulesetLive,
+            rulesetBattleSeedsRef.current,
+            summary.party,
+            personaInfo?.name,
+          );
+          for (const refusal of written.refused) {
+            console.warn("[game-ruleset] A sheet refused part of the battle result", refusal);
+          }
+          // The battle already showed the change, so a sheet that did not take it has to be said
+          // out loud, the way a refused sheet command from the Game Master is.
+          if (written.refused.length > 0) {
+            const names = [...new Set(written.refused.map((refusal) => refusal.name))];
+            toast.warning(localizeUi("game.ruleset.battle.writeBackRefused", { names: names.join(", ") }));
+          }
+          if (written.live) patchGameStateField("rulesetLive", written.live);
+          if (written.updated.length > 0) {
+            sheetRecapLine = `Sheets: the ${rulesetDefinition.name} sheets for ${written.updated.join(", ")} were updated with what this battle cost. Do not change those numbers again.`;
+          }
+        }
+      }
+      rulesetBattleSeedsRef.current = null;
+
       // Build a compact, model-friendly recap so the GM can narrate the aftermath.
       const defeatedEnemies = summary.enemies.filter((e) => e.defeated).map((e) => e.name);
       const survivingEnemies = summary.enemies.filter((e) => !e.defeated);
@@ -10251,7 +10591,13 @@ function GameSurfaceComponent({
         const hpPct = p.maxHp > 0 ? Math.round((p.hp / p.maxHp) * 100) : 0;
         const effects = p.statusEffects.length > 0 ? ` [${p.statusEffects.join(", ")}]` : "";
         const ko = p.ko ? " KO" : "";
-        return `${p.name}: ${p.hp}/${p.maxHp} HP (${hpPct}%)${effects}${ko}`;
+        const resources = [
+          p.mp !== undefined ? `${p.mp}/${p.maxMp ?? p.mp} MP` : "",
+          p.spellSlots ? `remaining spell slots ${JSON.stringify(p.spellSlots)}` : "",
+        ]
+          .filter(Boolean)
+          .join(", ");
+        return `${p.name}: ${p.hp}/${p.maxHp} HP (${hpPct}%)${resources ? `; ${resources}` : ""}${effects}${ko}`;
       });
       const lootText =
         summary.loot && summary.loot.length > 0
@@ -10271,6 +10617,7 @@ function GameSurfaceComponent({
         recapLines.push(`Survived: ${survivingEnemies.map((e) => `${e.name} (${e.hp}/${e.maxHp} HP)`).join(", ")}`);
       }
       recapLines.push(`Party: ${partyStatus.join("; ")}`);
+      if (sheetRecapLine) recapLines.push(sheetRecapLine);
       if (summary.battlefieldSummary?.trim()) recapLines.push(`Battlefield: ${summary.battlefieldSummary.trim()}`);
       if (lootText) recapLines.push(`Loot: ${lootText}`);
       else
@@ -10313,7 +10660,17 @@ function GameSurfaceComponent({
         })
         .catch(() => {});
     },
-    [sendMessage, activeChatId, clearCombatSnapshot, transitionGameState],
+    [
+      sendMessage,
+      activeChatId,
+      chatMeta.gameCharacterCards,
+      clearCombatSnapshot,
+      gameRuleset,
+      localizeUi,
+      patchGameStateField,
+      personaInfo?.name,
+      transitionGameState,
+    ],
   );
 
   // Toggle audio mute
@@ -12624,7 +12981,25 @@ function GameSurfaceComponent({
                             </div>
                           }
                         >
-                          {effectiveCombatStyle === "tactical" ? (
+                          {combatSetupConfig?.combatDirector && combatStartMessageId ? (
+                            <DirectedCombatUI
+                              key={`${activeChatId}:${combatStartMessageId}`}
+                              chatId={activeChatId}
+                              anchor={combatStartMessageId}
+                              style={effectiveCombatStyle}
+                              battlefield={combatSceneMeta?.battlefield ?? undefined}
+                              party={combatParty}
+                              enemies={combatEnemies}
+                              inventoryItems={inventoryItems}
+                              combatItemEffects={combatItemEffects}
+                              combatMechanics={combatMechanics}
+                              environment={combatSceneMeta?.environmentType ?? undefined}
+                              formation={combatSceneMeta?.formation ?? undefined}
+                              onCombatEnd={handleCombatEnd}
+                              onInventoryItemUsed={handleUseCombatInventoryItem}
+                              onCombatantsChange={handleCombatantsChange}
+                            />
+                          ) : effectiveCombatStyle === "tactical" ? (
                             <TacticalCombatUI
                               key={activeChatId}
                               chatId={activeChatId}
@@ -13110,6 +13485,7 @@ function GameSurfaceComponent({
           onAvatarSelect={(file) =>
             handlePartyPortraitUpload(characterSheetCharId, partyCards[characterSheetCharId].title, file)
           }
+          ruleset={characterSheetRuleset}
         />
       )}
 

@@ -5305,6 +5305,19 @@ test("character schedules export the live draft and import safely", async ({ pag
     let dialog = await openScheduleEditor();
     let activity = await expandMonday(dialog);
     await activity.fill("Unsaved export draft");
+    await dialog.getByText("Tuning", { exact: true }).click();
+    await dialog.getByText("Advanced timing", { exact: true }).click();
+    const capInput = dialog.getByRole("spinbutton", { name: /^Daily safety limit/i });
+    await capInput.fill("1.5");
+    await dialog.getByRole("button", { name: "Export schedule", exact: true }).click();
+    await expect(
+      page.getByText("Daily safety limit must be a whole number of at least 1, or blank for Default.").first(),
+    ).toBeVisible();
+    await capInput.fill("0");
+    await dialog.getByRole("button", { name: "Save schedule", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    expect((await storedSchedule())!.autonomousDailyCapOverride).toBeNull();
+    await dialog.getByRole("spinbutton", { name: /^Daily safety limit/i }).fill("1000");
 
     const downloadPromise = page.waitForEvent("download");
     await dialog.getByRole("button", { name: "Export schedule", exact: true }).click();
@@ -5320,6 +5333,7 @@ test("character schedules export the live draft and import safely", async ({ pag
     expect(exported.kind).toBe("marinara.character-schedule");
     expect(exported.version).toBe(1);
     expect(exported.schedule.days.Monday[0]?.activity).toBe("Unsaved export draft");
+    expect(exported.schedule.autonomousDailyCapOverride).toBe(1000);
 
     const fileInput = dialog.locator('input[type="file"][accept*=".json"]');
     await fileInput.setInputFiles({ name: "invalid.json", mimeType: "application/json", buffer: Buffer.from("{}") });
@@ -5337,6 +5351,7 @@ test("character schedules export the live draft and import safely", async ({ pag
 
     const importedSchedule = {
       ...originalSchedule,
+      autonomousDailyCapOverride: 100,
       days: {
         ...emptyDays(),
         Monday: [{ time: "10:00-18:00", activity: "Imported current format", status: "online" }],
@@ -5353,6 +5368,7 @@ test("character schedules export the live draft and import safely", async ({ pag
     });
     await expect(page.getByText("Schedule imported as an unsaved draft.", { exact: true })).toBeVisible();
     await expect(activity).toHaveValue("Imported current format");
+    await expect(dialog.getByRole("spinbutton", { name: /^Daily safety limit/i })).toHaveValue("100");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect.poll(async () => (await storedSchedule())!.days.Monday![0]?.activity).toBe("Original research");
 
@@ -5361,6 +5377,7 @@ test("character schedules export the live draft and import safely", async ({ pag
     await expect(activity).toHaveValue("Original research");
     const legacySchedule = {
       ...originalSchedule,
+      autonomousDailyCapOverride: 50,
       days: {
         ...emptyDays(),
         Monday: [{ time: "11:00-19:00", activity: "Imported legacy format", status: "idle" }],
@@ -5376,6 +5393,17 @@ test("character schedules export the live draft and import safely", async ({ pag
     await dialog.getByRole("button", { name: "Save schedule", exact: true }).click();
     await expect.poll(async () => (await storedSchedule())!.days.Monday![0]?.activity).toBe("Imported legacy format");
     expect((await storedSchedule())!.talkativeness).toBe(90);
+    expect((await storedSchedule())!.autonomousDailyCapOverride).toBe(50);
+
+    await page.reload();
+    dialog = await openScheduleEditor();
+    await dialog.getByText("Tuning", { exact: true }).click();
+    await dialog.getByText("Advanced timing", { exact: true }).click();
+    const dailyCap = dialog.getByRole("spinbutton", { name: /^Daily safety limit/i });
+    await expect(dailyCap).toHaveValue("50");
+    await dailyCap.fill("");
+    await dialog.getByRole("button", { name: "Save schedule", exact: true }).click();
+    await expect.poll(async () => (await storedSchedule())!.autonomousDailyCapOverride).toBeNull();
   } finally {
     await Promise.allSettled([
       request.delete(`/api/chats/${chat.id}`),

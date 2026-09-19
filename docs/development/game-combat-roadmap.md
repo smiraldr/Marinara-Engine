@@ -19,7 +19,7 @@ Do not expose unfinished combinations. Narrative companions and combat units are
 
 The GM supplies a small structured brief grounded in the scene. The engine resolves exact terrain and spawns using a seed, validates the board, and saves the resolved result. The GM then describes the accepted battlefield. Routine movement and attacks do not require model calls.
 
-Extend the existing environment/formation pipeline with optional map size, scene landmarks, player terrain guidance and a reusable seed. Keep old setups valid. Save the accepted grid and generator provenance so a future generator change cannot redraw an existing battle. Saved seeds reproduce generation given the same brief and combatants; they do not make arbitrary model output deterministic.
+The environment/formation pipeline supports optional map size and scene landmarks. Terrain guidance belongs to each encounter; map seeds are internal per encounter, with no campaign setup seed control. Keep old setups valid. Save the accepted grid and generator provenance so a future generator change cannot redraw an existing battle. Saved seeds reproduce generation given the same brief and combatants; they do not make arbitrary model output deterministic.
 
 Generated terrain may be repaired for connectivity, but authored constraints must not silently disappear. Bound model output, tile counts, unit counts and feature dimensions. Reject an impossible constrained layout with an actionable reason and offer an explicit generated fallback. A full paint/place editor and arbitrary authored maps are later work and must use the same validation rules.
 

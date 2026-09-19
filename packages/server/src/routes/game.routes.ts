@@ -1,3 +1,7 @@
+import { normalizeGameDifficulty, normalizeWeatherType, combatWeatherSchema } from "@marinara-engine/shared";
+import { resolveCombatWeather } from "../services/game/weather.service.js";
+import { resolveGameConnection } from "../services/game/connection.service.js";
+import { combatAiHintsSchema, combatTacticsSchema, combatInterruptFields } from "@marinara-engine/shared";
 // ──────────────────────────────────────────────
 // Routes: Game Mode
 // ──────────────────────────────────────────────
@@ -21,7 +25,7 @@ import { createPersonaGalleryStorage } from "../services/storage/persona-gallery
 import { createGalleryStorage } from "../services/storage/gallery.storage.js";
 import { createGameSceneVideosStorage } from "../services/storage/game-scene-videos.storage.js";
 import { createGameStoryboardsStorage } from "../services/storage/game-storyboards.storage.js";
-import { createGameStateStorage } from "../services/storage/game-state.storage.js";
+import { createGameStateStorage, parseStoredRulesetLive } from "../services/storage/game-state.storage.js";
 import {
   createGameEngineStateStorage,
   EXPERIENCE_GAME_TYPE_PREFIX,
@@ -120,6 +124,12 @@ import {
   type CapturedEngineState,
   type CheckpointTrigger,
 } from "../services/game/checkpoint.service.js";
+import {
+  createRulesetRef,
+  loadRulesetRegistry,
+  resolveGameRuleset,
+} from "../services/game/ruleset-registry.service.js";
+import { getCustomAgentImportPolicy } from "../services/agents/custom-agent-import-policy.service.js";
 import { resolveChatSkillCheck } from "../services/game/skill-check-resolution.service.js";
 import { applyAllSegmentEdits, stripGmCommandTags } from "../services/game/segment-edits.js";
 import { processLorebooks, type LorebookScanResult } from "../services/lorebook/index.js";
@@ -157,7 +167,6 @@ import {
   getDefaultAgentPrompt,
   resolveAgentPromptTemplate,
   isClaudeAdaptiveOnlyNoSamplingModel,
-  localAuthProviderBaseUrl,
   sceneAnalysisRequestSchema,
   resolveProviderReasoningEffort,
   scoreMusic,
@@ -173,6 +182,11 @@ import {
   parseTrackerFieldLocks,
   parseTrackerHiddenFields,
   normalizeRpgStatPools,
+  copyRulesetSheetForGame,
+  isCommunityRulesetId,
+  rulesetRefSchema,
+  type RulesetDefinition,
+  type RulesetRef,
   normalizeIllustratorImagesPerGeneration,
   resolveGameImageDynamicPromptEnabled,
   resolveGameSetupArtStylePrompt,
@@ -181,9 +195,7 @@ import {
   STORYBOARD_AGENT_ID,
   SPOTIFY_RECENT_TRACK_HISTORY_LIMIT,
   createTacticalCombat,
-  applyAction as applyTacticalAction,
-  runEnemyPhase as runTacticalEnemyPhase,
-  isTerminal as isTacticalTerminal,
+  applyTacticalTurn,
   TERRAIN_DATA,
   extractLeadingThinkingBlocks,
   type RPGStatsConfig,
@@ -1790,8 +1802,10 @@ const gameSetupConfigSchema = z.object({
   genre: z.string().min(1).max(200),
   setting: z.string().min(1),
   tone: z.string().min(1).max(200),
-  difficulty: z.string().min(1).max(100),
+  difficulty: z.string().min(1).max(100).transform(normalizeGameDifficulty),
   combatStyle: z.enum(["classic", "tactical"]).optional(),
+  combatDirector: z.boolean().optional(),
+  gmBossControl: z.boolean().optional(),
   tacticalBattlefield: tacticalBattlefieldSetupSchema.optional(),
   spatialMapInstructions: z.string().max(4000).optional(),
   gameWorldMapMode: z.enum(["standard", "hierarchical"]).optional(),
@@ -1807,6 +1821,8 @@ const gameSetupConfigSchema = z.object({
   /** Installed package that provides this game's experience. Same shape the manifest allows for an id,
    *  since this is matched against one to mount the surface. */
   gameExperienceId: z.string().regex(GAME_EXPERIENCE_ID_PATTERN).max(GAME_EXPERIENCE_ID_MAX_CHARS).optional(),
+  // Only the id is trusted; the pin itself is rebuilt from the server's own registry at creation.
+  ruleset: rulesetRefSchema.optional(),
   /** Opaque config owned by that experience — persisted verbatim, never read by the host. */
   experienceConfig: z
     .record(z.string().max(120), z.unknown())
@@ -1867,6 +1883,7 @@ const createGameSchema = z.object({
   shareLabels: z
     .object({
       experienceName: z.string().max(120).optional(),
+      rulesetName: z.string().max(120).optional(),
       experienceSeedKey: z.string().max(120).optional(),
       characterNames: z.record(z.string(), z.string().max(500)).optional(),
       lorebookNames: z.record(z.string(), z.string().max(500)).optional(),
@@ -2487,7 +2504,7 @@ function hasGeneratedGameCharacterCardContent(card: ReturnType<typeof normalizeG
   );
 }
 
-function applyGeneratedGameCharacterCards(
+export function applyGeneratedGameCharacterCards(
   currentCards: Array<Record<string, unknown>>,
   rawCards: unknown,
 ): { cards: Array<Record<string, unknown>>; updatedCount: number } {
@@ -2517,12 +2534,13 @@ function applyGeneratedGameCharacterCards(
 
     updatedCount += 1;
     const normalizedCard = normalizeGeneratedGameCharacterCard(generatedCard, existingName);
-    return existingCard.rpgStats
-      ? {
-          ...normalizedCard,
-          rpgStats: existingCard.rpgStats,
-        }
-      : normalizedCard;
+    // The generated card is rebuilt from an allow-list. What the model never writes and the game
+    // owns rides along: the RPG stats and this game's copy of the ruleset sheet.
+    return {
+      ...normalizedCard,
+      ...(existingCard.rpgStats ? { rpgStats: existingCard.rpgStats } : {}),
+      ...(existingCard.rulesetSheet ? { rulesetSheet: existingCard.rulesetSheet } : {}),
+    };
   });
 
   return { cards, updatedCount };
@@ -2986,26 +3004,7 @@ async function resolveConnection(
   connId: string | null | undefined,
   chatConnectionId: string | null,
 ) {
-  let id = connId ?? chatConnectionId;
-  if (id === "random") {
-    const pool = await connections.listRandomPool();
-    if (!pool.length) throw new Error("No connections marked for the random pool");
-    id = pool[Math.floor(Math.random() * pool.length)].id;
-  }
-  if (!id) throw new Error("No API connection configured");
-  const conn = await connections.getWithKey(id);
-  if (!conn) throw new Error("API connection not found");
-
-  let baseUrl = conn.baseUrl;
-  if (!baseUrl) {
-    const { PROVIDERS } = await import("@marinara-engine/shared");
-    const providerDef = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
-    baseUrl = providerDef?.defaultBaseUrl ?? "";
-  }
-  const localAuthBaseUrl = localAuthProviderBaseUrl(conn.provider);
-  if (!baseUrl && localAuthBaseUrl) baseUrl = localAuthBaseUrl;
-  if (!baseUrl) throw new Error("No base URL configured for this connection");
-
+  const { conn, baseUrl } = await resolveGameConnection(connections, connId, chatConnectionId);
   return { conn, baseUrl, defaultGenerationParameters: parseStoredGenerationParameters(conn.defaultParameters) };
 }
 
@@ -4931,6 +4930,8 @@ function replaceFirstUnresolvedSkillCheckTag(
     if (!isEngineRollableSkillCheckTag(tag)) return fullTag;
     if (tag.skill.trim().toLowerCase() !== request.skill.trim().toLowerCase()) return fullTag;
     if (tag.dc !== request.dc) return fullTag;
+    // Set by a ruleset game only: the tag must then be that character's own.
+    if (result.who && (tag.who ?? "").trim().toLowerCase() !== result.who.trim().toLowerCase()) return fullTag;
 
     replaced = true;
     return serializeResolvedSkillCheckTag(result);
@@ -6046,8 +6047,56 @@ export async function gameRoutes(app: FastifyInstance) {
     return { partyRpgStats, personaRpgStats, personaName };
   };
 
+  /** The party's and the persona's stored sheets for the game's pinned ruleset, by normalized
+   *  name, which is how a generated card is matched to its source everywhere else in setup. Null
+   *  when the game has no ruleset or the install cannot honour the pin. Read here, once, so both
+   *  setup entry points copy sheets the same way. */
+  const loadSetupRulesetSheets = async (
+    chatId: string,
+    chatPersonaId: string | null,
+    meta: Record<string, unknown>,
+    setupConfig: GameSetupConfig | null,
+  ): Promise<{ definition: RulesetDefinition; stored: Map<string, unknown> } | null> => {
+    if (meta.gameRuleset == null) return null;
+    // loadRulesetRegistry never throws (a failed read is an empty registry) and resolving is pure,
+    // so an install that cannot honour the pin arrives here as a status, not as an exception.
+    const pinned = resolveGameRuleset(meta, await loadRulesetRegistry());
+    if (pinned.status !== "ok") {
+      logger.warn("[game/setup] Chat %s is pinned to a ruleset that is not available; no sheets were copied", chatId);
+      return null;
+    }
+    const rulesetId = pinned.definition.id;
+    const characters = createCharactersStorage(app.db);
+    const stored = new Map<string, unknown>();
+    for (const pcId of setupConfig?.partyCharacterIds ?? []) {
+      const pc = await characters.getById(pcId);
+      if (!pc) continue;
+      try {
+        const data = typeof pc.data === "string" ? JSON.parse(pc.data) : pc.data;
+        const sheet = data?.extensions?.rulesetSheets?.[rulesetId];
+        if (sheet && typeof data.name === "string") stored.set(normalizeCharacterLookupName(data.name), sheet);
+      } catch {
+        /* an unreadable card simply has no sheet to copy */
+      }
+    }
+    const personaId = chatPersonaId || setupConfig?.personaId;
+    const persona = personaId ? await characters.getPersona(personaId) : null;
+    if (persona) {
+      try {
+        const stats = persona.personaStats ? JSON.parse(persona.personaStats) : null;
+        const sheet = stats?.rulesetSheets?.[rulesetId];
+        // The persona is the player, so its sheet wins a name it shares with a party member.
+        if (sheet) stored.set(normalizeCharacterLookupName(persona.name), sheet);
+      } catch {
+        /* skip */
+      }
+    }
+    return { definition: pinned.definition, stored };
+  };
+
   const applyGameSetupPayload = async (args: {
     chatId: string;
+    chatPersonaId: string | null;
     chatCharacterIds: string[];
     meta: Record<string, unknown>;
     setupData: Record<string, unknown>;
@@ -6183,6 +6232,7 @@ export async function gameRoutes(app: FastifyInstance) {
     }
 
     if (setupData.characterCards && Array.isArray(setupData.characterCards)) {
+      const rulesetSheets = await loadSetupRulesetSheets(chatId, args.chatPersonaId, meta, setupConfig);
       const cards = (setupData.characterCards as Array<Record<string, unknown>>)
         .map((c) => {
           const name = (c.name as string) || "";
@@ -6206,6 +6256,15 @@ export async function gameRoutes(app: FastifyInstance) {
                   pools: normalizeRpgStatPools(rpg),
                 }
               : undefined,
+            // The game's own copy of the starting build, or a blank one, so every card has a sheet.
+            ...(rulesetSheets
+              ? {
+                  rulesetSheet: copyRulesetSheetForGame(
+                    rulesetSheets.definition,
+                    rulesetSheets.stored.get(normalizedCardName),
+                  ),
+                }
+              : {}),
           };
         })
         .filter((c) => c.name);
@@ -6420,8 +6479,33 @@ export async function gameRoutes(app: FastifyInstance) {
       Boolean(parsedCreateGameInput.setupConfig.spatialMapInstructions?.trim())
         ? "hierarchical"
         : "standard");
+    // A ruleset is pinned once, here, from what is installed right now. A ruleset the install
+    // does not have is refused rather than dropped, because silently starting the game on other
+    // rules is the one outcome the player did not choose.
+    let gameRuleset: RulesetRef | null = null;
+    if (parsedCreateGameInput.setupConfig.ruleset) {
+      const requestedRulesetId = parsedCreateGameInput.setupConfig.ruleset.id;
+      // Imported rulesets follow the custom Agent import policy: with imports off they are hidden
+      // from NEW games. Resolution never consults the policy, so a game that already pinned one
+      // keeps running — turning the switch off must not break somebody's campaign.
+      if (isCommunityRulesetId(requestedRulesetId) && !(await getCustomAgentImportPolicy(app.db)).enabled) {
+        return reply.status(400).send({
+          error: "Imported rulesets are turned off in Settings, so a new game cannot start on one.",
+          code: "ruleset_imports_disabled",
+        });
+      }
+      const registered = (await loadRulesetRegistry(app.db)).get(requestedRulesetId);
+      if (!registered) {
+        return reply.status(400).send({
+          error: `The ruleset "${requestedRulesetId}" is not installed.`,
+          code: "ruleset_not_installed",
+        });
+      }
+      gameRuleset = createRulesetRef(registered);
+    }
     const setupConfig: GameSetupConfig = {
       ...parsedCreateGameInput.setupConfig,
+      ...(gameRuleset ? { ruleset: gameRuleset } : {}),
       gameWorldMapMode:
         requestedWorldMapMode === "hierarchical" && parsedCreateGameInput.setupConfig.enableAgents === true
           ? "hierarchical"
@@ -6563,6 +6647,9 @@ export async function gameRoutes(app: FastifyInstance) {
       gameSceneConnectionId: setupConfig.sceneConnectionId || null,
       // Chosen at creation and fixed for the game's lifetime (see GameSetupConfig).
       gameExperienceId: setupConfig.gameExperienceId || null,
+      // Likewise fixed for the game's lifetime. Written only when a ruleset was chosen, so a game
+      // on Marinara's own rules carries exactly the metadata it always has.
+      ...(gameRuleset ? { gameRuleset } : {}),
       gameNpcs: [],
       enableAgents: setupConfig.enableAgents === true,
       activeAgentIds: setupActiveAgentIds,
@@ -6954,6 +7041,7 @@ export async function gameRoutes(app: FastifyInstance) {
     try {
       setupResult = await applyGameSetupPayload({
         chatId,
+        chatPersonaId: chat.personaId ?? null,
         chatCharacterIds: parseChatCharacterIds(chat.characterIds),
         meta,
         setupData,
@@ -7018,6 +7106,7 @@ export async function gameRoutes(app: FastifyInstance) {
     try {
       setupResult = await applyGameSetupPayload({
         chatId,
+        chatPersonaId: chat.personaId ?? null,
         chatCharacterIds: parseChatCharacterIds(chat.characterIds),
         meta,
         setupData,
@@ -7418,6 +7507,9 @@ export async function gameRoutes(app: FastifyInstance) {
             playerStats: previousPlayerStats as any,
             personaStats: previousPersonaStats as any,
             hiddenTrackerFields: previousHiddenTrackerFields,
+            // A new session continues with the party as the last one left it: spent slots stay
+            // spent until a rest restores them.
+            rulesetLive: parseStoredRulesetLive(previousState.rulesetLive),
             committed: true,
           });
         } catch (err) {
@@ -8938,12 +9030,23 @@ export async function gameRoutes(app: FastifyInstance) {
       ? buildFallbackGameCharacterCard(recruit.data, recruit.name)
       : buildNpcPartyCard(npcRecruit!);
     const recruitRpgStats = recruit ? extractRecruitCharacterRpgStats(recruit.data) : undefined;
+    // In a game on a ruleset a recruit joins the way the party did at setup: with a copy of the
+    // library card's starting build, or a blank sheet (an NPC has no library card to copy from).
+    const pinnedRuleset = meta.gameRuleset != null ? resolveGameRuleset(meta, await loadRulesetRegistry()) : null;
+    const recruitRulesetSheet =
+      pinnedRuleset?.status === "ok"
+        ? copyRulesetSheetForGame(
+            pinnedRuleset.definition,
+            recruit?.data.extensions?.rulesetSheets?.[pinnedRuleset.definition.id],
+          )
+        : undefined;
     const recruitSourceCard = recruit
       ? buildRecruitCharacterSourceCard(recruit.data)
       : buildNpcRecruitCharacterSourceCard(npcRecruit!);
     let nextCard: Record<string, unknown> = {
       ...fallbackCard,
       ...(recruitRpgStats ? { rpgStats: recruitRpgStats } : {}),
+      ...(recruitRulesetSheet ? { rulesetSheet: recruitRulesetSheet } : {}),
     };
 
     if (existingCardIndex >= 0) {
@@ -9056,6 +9159,7 @@ export async function gameRoutes(app: FastifyInstance) {
           nextCard = {
             ...normalizeGeneratedGameCharacterCard(rawCard, recruitName),
             ...(recruitRpgStats ? { rpgStats: recruitRpgStats } : {}),
+            ...(recruitRulesetSheet ? { rulesetSheet: recruitRulesetSheet } : {}),
           };
         }
       } catch (error) {
@@ -9225,9 +9329,13 @@ export async function gameRoutes(app: FastifyInstance) {
     advantage: z.boolean().optional(),
     disadvantage: z.boolean().optional(),
     preRolledD20: z.number().int().min(1).max(20).optional(),
+    /** The party member to roll for in a game with a pinned ruleset; ignored without one. */
+    who: z.string().trim().min(1).max(100).optional(),
     messageId: z.string().min(1).optional(),
   });
 
+  // ponytail: dc stays capped at 40 here even when a ruleset's ladder reaches further. Generation
+  // post-processing already honours the ladder; widen this when a ruleset needs the fallback too.
   app.post("/skill-check", async (req) => {
     const input = skillCheckSchema.parse(req.body);
 
@@ -9239,6 +9347,7 @@ export async function gameRoutes(app: FastifyInstance) {
       advantage: input.advantage,
       disadvantage: input.disadvantage,
       preRolledD20: input.preRolledD20,
+      who: input.who,
     });
 
     let updatedContent: string | undefined;
@@ -9534,7 +9643,7 @@ export async function gameRoutes(app: FastifyInstance) {
   });
 
   // ── POST /game/combat/round ──
-  app.post("/combat/round", async (req) => {
+  app.post("/combat/round", async (req, reply) => {
     const schema = z.object({
       chatId: z.string().min(1),
       combatants: z.array(
@@ -9543,6 +9652,7 @@ export async function gameRoutes(app: FastifyInstance) {
           name: generatedRequiredStringSchema,
           hp: z.number(),
           maxHp: z.number(),
+          spellSlots: z.record(z.string().regex(/^[1-9]$/), z.number().int().min(0).max(100)).optional(),
           mp: z.number().optional(),
           maxMp: z.number().optional(),
           attack: z.number(),
@@ -9550,13 +9660,17 @@ export async function gameRoutes(app: FastifyInstance) {
           speed: z.number(),
           level: z.number(),
           side: z.enum(["player", "enemy"]).optional(),
+          tactics: combatTacticsSchema.optional(),
+          controller: z.enum(["manual", "ai"]).optional(),
+          skillCooldowns: z.record(z.number().int().min(0).max(10000)).optional(),
           skills: z
             .array(
               z.object({
                 id: generatedRequiredStringSchema,
                 name: generatedRequiredStringSchema,
                 type: z.enum(["attack", "heal", "buff", "debuff"]),
-                mpCost: z.number(),
+                ...combatInterruptFields,
+                mpCost: z.number().min(0),
                 power: z.number(),
                 description: generatedOptionalStringSchema,
                 cooldown: z.number().optional(),
@@ -9643,13 +9757,38 @@ export async function gameRoutes(app: FastifyInstance) {
         )
         .optional(),
     });
-    const { chatId, combatants, round, playerAction, mechanics } = schema.parse(req.body);
+    const parsed = schema
+      .extend({
+        partyActions: z
+          .record(
+            z
+              .string()
+              .min(1)
+              .max(256)
+              .refine((id) => !["__proto__", "constructor", "prototype"].includes(id)),
+            schema.shape.playerAction.unwrap(),
+          )
+          .refine((value) => Object.keys(value).length <= 20)
+          .optional(),
+        controlledId: z.string().min(1).optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
+    const { chatId, combatants, round, playerAction, mechanics, partyActions, controlledId } = parsed.data;
+    if (controlledId && !combatants.some((c) => c.id === controlledId && c.hp > 0 && c.side === "player"))
+      return reply.code(400).send({ error: "Controlled combatant must be a living party member." });
+    if (
+      Object.keys(partyActions ?? {}).some(
+        (id) => !combatants.some((c) => c.id === id && c.hp > 0 && c.side === "player"),
+      )
+    )
+      return reply.code(400).send({ error: "Party commands must name living party members." });
     const chats = createChatsStorage(app.db);
     const chat = await chats.getById(chatId);
     if (!chat) throw new Error("Chat not found");
 
     const meta = parseMeta(chat.metadata);
-    const difficulty = ((meta.gameSetupConfig as Record<string, unknown>)?.difficulty as string) ?? "normal";
+    const difficulty = normalizeGameDifficulty((meta.gameSetupConfig as Record<string, unknown>)?.difficulty);
     const elementPreset = ((meta.gameSetupConfig as Record<string, unknown>)?.elementPreset as string) ?? "default";
     const result = resolveCombatRound(
       combatants as (CombatantStats & { side?: "player" | "enemy" })[],
@@ -9658,6 +9797,8 @@ export async function gameRoutes(app: FastifyInstance) {
       elementPreset,
       playerAction,
       mechanics,
+      partyActions,
+      controlledId,
     );
 
     return { result, combatants };
@@ -9672,8 +9813,22 @@ export async function gameRoutes(app: FastifyInstance) {
   // A combatant blob from the client. The engine reads a fixed set of numeric
   // fields; everything else (mp/skills/statusEffects/element/sprite/side) passes
   // through untouched so hydration stays lossless.
+  const tacticalSkillSchema = z
+    .object({
+      projectile: z.boolean().optional(),
+      requiresSight: z.boolean().optional(),
+      id: z.string(),
+      name: z.string().min(1),
+      type: z.enum(["attack", "heal", "buff", "debuff"]),
+      mpCost: z.number().min(0),
+      power: z.number().min(0),
+      cooldown: z.number().min(0).optional(),
+    })
+    .passthrough();
   const tacticalCombatantSchema = z
     .object({
+      projectile: z.boolean().optional(),
+      requiresSight: z.boolean().optional(),
       id: z.string().min(1),
       name: z.string().min(1),
       hp: z.number(),
@@ -9682,12 +9837,22 @@ export async function gameRoutes(app: FastifyInstance) {
       defense: z.number(),
       speed: z.number(),
       level: z.number(),
+      skills: z.array(tacticalSkillSchema).max(128).optional(),
+      tactics: combatTacticsSchema.optional(),
+      aiHints: combatAiHintsSchema.optional(),
+      controller: z.enum(["manual", "ai"]).optional(),
       movementMode: z.enum(["walk", "fly", "teleport"]).optional(),
     })
     .passthrough();
 
   const tacticalStateUnitSchema = z
     .object({
+      projectile: z.boolean().optional(),
+      requiresSight: z.boolean().optional(),
+      skills: z.array(tacticalSkillSchema).max(128).optional(),
+      tactics: combatTacticsSchema.optional(),
+      aiHints: combatAiHintsSchema.optional(),
+      controller: z.enum(["manual", "ai"]).optional(),
       movementMode: z.enum(["walk", "fly", "teleport"]).optional(),
     })
     .passthrough();
@@ -9706,6 +9871,7 @@ export async function gameRoutes(app: FastifyInstance) {
   const tacticalStateSchema = z
     .object({
       schemaVersion: z.literal(1),
+      weather: combatWeatherSchema.optional(),
       grid: z
         .object({
           width: z.number().int().min(1).max(64),
@@ -9760,7 +9926,8 @@ export async function gameRoutes(app: FastifyInstance) {
   // returns `{ ok: false, error }` for illegal input.
   const tacticalActionSchema = z
     .object({
-      type: z.enum(["move", "attack", "skill", "item", "defend", "wait", "endTurn", "flee"]),
+      type: z.enum(["move", "attack", "skill", "item", "defend", "wait", "endTurn", "flee", "control"]),
+      controller: z.enum(["manual", "ai"]).optional(),
     })
     .passthrough();
 
@@ -9773,6 +9940,7 @@ export async function gameRoutes(app: FastifyInstance) {
       party: z.array(tacticalCombatantSchema).min(1).max(20),
       enemies: z.array(tacticalCombatantSchema).min(1).max(20),
       seed: tacticalBattlefieldSeedSchema.optional(),
+      weather: combatWeatherSchema.nullable().optional(),
       // Scene-derived battlefield theming (Round 2). Unknown strings normalize
       // in the engine (environment → default, formation → "line").
       environment: z.string().optional(),
@@ -9787,7 +9955,7 @@ export async function gameRoutes(app: FastifyInstance) {
         .status(400)
         .send({ error: `Invalid tactical battle request: ${field}${issue?.message ?? "invalid input"}` });
     }
-    const { chatId, party, enemies, seed, environment, formation, battlefield } = parsed.data;
+    const { chatId, party, enemies, seed, environment, formation, battlefield, weather } = parsed.data;
 
     const chats = createChatsStorage(app.db);
     const chat = await chats.getById(chatId);
@@ -9795,7 +9963,7 @@ export async function gameRoutes(app: FastifyInstance) {
 
     const meta = parseMeta(chat.metadata);
     const setupConfig = meta.gameSetupConfig as Record<string, unknown> | undefined;
-    const difficulty = (setupConfig?.difficulty as string) ?? "normal";
+    const difficulty = normalizeGameDifficulty(setupConfig?.difficulty);
     const preferences = resolveTacticalStartPreferences({
       setup: setupConfig?.tacticalBattlefield,
       requestSeed: seed,
@@ -9808,6 +9976,15 @@ export async function gameRoutes(app: FastifyInstance) {
     try {
       state = createTacticalCombat(party as unknown as Combatant[], enemies as unknown as Combatant[], {
         seed: preferences.seed,
+        weather:
+          weather === null
+            ? undefined
+            : (weather ??
+              resolveCombatWeather(
+                meta.gameWeather ?? (await createGameStateStorage(app.db).getLatestCommitted(chatId))?.weather,
+                environment,
+                preferences.battlefield?.exposure,
+              )),
         difficulty,
         environment,
         formation,
@@ -9857,24 +10034,14 @@ export async function gameRoutes(app: FastifyInstance) {
     // violate. Guard against that so a malformed request fails cleanly with a
     // 400 instead of an unhandled 500.
     try {
-      const applied = applyTacticalAction(state as unknown as TacticalCombatState, action as unknown as TacticalAction);
+      if (action.type === "control" && (!action.controller || typeof action.unitId !== "string"))
+        return reply.status(400).send({ error: "Choose a unit and its controller." });
+      const applied = applyTacticalTurn(state as unknown as TacticalCombatState, action as unknown as TacticalAction);
       if (!applied.ok) {
         return reply.status(400).send({ error: applied.error });
       }
 
-      let nextState = applied.state;
-      const events = [...applied.events];
-
-      // The player action auto-advances the phase once every party unit has acted.
-      // Resolve the enemy phase in the same round-trip and append its events after
-      // the player's, so the client animates one continuous sequence.
-      if (nextState.phase === "enemy" && !isTacticalTerminal(nextState)) {
-        const enemyResult = runTacticalEnemyPhase(nextState);
-        nextState = enemyResult.state;
-        events.push(...enemyResult.events);
-      }
-
-      return { state: nextState, events };
+      return { state: applied.state, events: applied.events };
     } catch (err) {
       logger.warn(err, "Tactical action failed on round-tripped state for chat %s", chatId);
       return reply.status(400).send({ error: "Invalid tactical combat state" });
@@ -9893,7 +10060,7 @@ export async function gameRoutes(app: FastifyInstance) {
     if (!chat) throw new Error("Chat not found");
 
     const meta = parseMeta(chat.metadata);
-    const difficulty = ((meta.gameSetupConfig as Record<string, unknown>)?.difficulty as string) ?? "normal";
+    const difficulty = normalizeGameDifficulty((meta.gameSetupConfig as Record<string, unknown>)?.difficulty);
     const drops = generateCombatLoot(enemyCount, difficulty);
     return { drops };
   });
@@ -9910,7 +10077,7 @@ export async function gameRoutes(app: FastifyInstance) {
     if (!chat) throw new Error("Chat not found");
 
     const meta = parseMeta(chat.metadata);
-    const difficulty = ((meta.gameSetupConfig as Record<string, unknown>)?.difficulty as string) ?? "normal";
+    const difficulty = normalizeGameDifficulty((meta.gameSetupConfig as Record<string, unknown>)?.difficulty);
     const drops = generateLootTable(count, difficulty);
     return { drops };
   });
@@ -9967,10 +10134,9 @@ export async function gameRoutes(app: FastifyInstance) {
     // "set" action from scene analyzer — apply the exact weather type
     if (action === "set" && type) {
       const biome = inferBiome(location);
-      const weather = generateWeather(biome, season);
-      // Override the randomly generated type with the scene analyzer's value
-      weather.type = type as any;
-      weather.description = `The weather is ${type}.`;
+      const weatherType = normalizeWeatherType(type);
+      if (!weatherType) return { changed: false, weather: meta.gameWeather ?? null };
+      const weather = generateWeather(biome, season, weatherType);
 
       // #5076: narrow queued patch so a concurrent metadata write is merged, not clobbered.
       await chats.patchMetadata(chatId, { gameWeather: weather });
@@ -10015,7 +10181,7 @@ export async function gameRoutes(app: FastifyInstance) {
     if (!chat) throw new Error("Chat not found");
 
     const meta = parseMeta(chat.metadata);
-    const difficulty = ((meta.gameSetupConfig as Record<string, unknown>)?.difficulty as string) ?? "normal";
+    const difficulty = normalizeGameDifficulty((meta.gameSetupConfig as Record<string, unknown>)?.difficulty);
     const encounter = rollEncounter(action, difficulty, location);
 
     let enemyCount = 0;
@@ -14604,6 +14770,8 @@ export async function gameRoutes(app: FastifyInstance) {
         personaStats: parseJsonField(snapshot.personaStats, null),
         fieldLocks: parseTrackerFieldLocks(snapshot.fieldLocks),
         hiddenTrackerFields: parseTrackerHiddenFields(snapshot.hiddenTrackerFields),
+        // Restoring a checkpoint restores the sheets as they stood then, spent slots included.
+        rulesetLive: parseStoredRulesetLive(snapshot.rulesetLive),
         committed: true,
       },
       manualOverrides,

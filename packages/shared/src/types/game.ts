@@ -1,3 +1,5 @@
+import type { CombatAttackTraits } from "../features/combat-conditions.js";
+import type { CombatAiHints, CombatController, CombatTactics } from "../features/combat-ai.js";
 // ──────────────────────────────────────────────
 // Game Mode Types
 // ──────────────────────────────────────────────
@@ -142,6 +144,9 @@ export interface GameCharacterCard {
     hp: { value: number; max: number };
     pools?: import("./character.js").RPGStatPool[];
   };
+  /** This game's copy of the character's sheet for the pinned ruleset (`chat.metadata.gameRuleset`).
+   *  Edited in the game, never written back to the library card or persona. */
+  rulesetSheet?: import("../schemas/ruleset.schema.js").RulesetSheetEnvelope;
 }
 
 // ── NPCs ──
@@ -209,6 +214,9 @@ export interface GameSetupConfig {
   rating: "sfw" | "nsfw";
   /** Combat presentation preference (classic menu battles vs tactical grid battles). Defaults to "classic". */
   combatStyle?: GameCombatStyle;
+  /** Versioned server-owned combat with interruption windows; absent preserves legacy battles. */
+  combatDirector?: boolean;
+  gmBossControl?: boolean;
   /** Optional tactical battlefield preferences used for newly-created encounters. */
   tacticalBattlefield?: TacticalBattlefieldSetup;
   /** Optional user prompt used to create the initial hierarchical world map draft. */
@@ -234,6 +242,9 @@ export interface GameSetupConfig {
    *  own surface over the shared narration. Chosen at creation and fixed for the game's lifetime, since an
    *  experience owns the whole run. Omitted = the built-in Game mode, unchanged. */
   gameExperienceId?: string;
+  /** The Game Mode ruleset chosen for a NEW game. The server pins it as `chat.metadata.gameRuleset`
+   *  from its own registry, so only `id` is trusted. Absent means Marinara's own rules. */
+  ruleset?: import("../schemas/ruleset.schema.js").RulesetRef;
   /** Whatever the experience's own setup collected, stored verbatim and never interpreted by the host, so
    *  it can always recover the options the game was created with. */
   experienceConfig?: Record<string, unknown>;
@@ -344,6 +355,8 @@ export interface GameInitialSetupConnectionSnapshot {
 /** Creation-time display names for local resources referenced by the setup. */
 export interface GameInitialSetupLabels {
   experienceName?: string;
+  /** Display name of the chosen ruleset, so a shared setup can name one the recipient lacks. */
+  rulesetName?: string;
   experienceSeedKey?: string;
   characterNames?: Record<string, string>;
   lorebookNames?: Record<string, string>;
@@ -406,6 +419,11 @@ export interface SkillCheckResult {
    * non-d20 systems (pool systems like V20) reach the dice card intact.
    */
   dice?: string;
+  /**
+   * The party member the check was rolled for, in a game with a pinned ruleset. Absent means the
+   * player, and always absent under the Engine's own rules, which only ever check the player.
+   */
+  who?: string;
 }
 
 // ── The sighted dice pool (opt-in, last) ──
@@ -484,7 +502,14 @@ export interface GameDicePoolSlotName {
 // ── Combat ──
 
 /** A combatant (player or enemy) in the battle system. */
-export interface Combatant {
+export interface Combatant extends CombatAttackTraits {
+  boss?: import("../features/combat-director.js").CombatBoss;
+  spellSlots?: Record<string, number>;
+  combatRound?: number;
+  tactics?: CombatTactics;
+  aiHints?: CombatAiHints;
+  controller?: CombatController;
+  skillCooldowns?: Record<string, number>;
   id: string;
   name: string;
   hp: number;
@@ -519,7 +544,15 @@ export interface CombatStatusEffect {
   turnsLeft: number;
 }
 
-export interface CombatSkill {
+export interface CombatSkill extends CombatAttackTraits {
+  areaRadius?: number;
+  friendlyFire?: boolean;
+  targetScope?: "single" | "all-enemies";
+  spell?: boolean;
+  reaction?: "counterspell" | "guard";
+  range?: number;
+  slotLevel?: number;
+  legendaryCost?: number;
   id: string;
   name: string;
   /** "attack" | "heal" | "buff" | "debuff" */
@@ -596,9 +629,9 @@ export type CombatPlayerAction =
 /**
  * Snapshot of an in-progress combat encounter, persisted to chat metadata so a
  * page refresh during a fight restores the live party/enemy state instead of
- * dropping back into prose narration. Internal GameCombatUI state (round
- * number, action queue, animation phase) is intentionally NOT persisted —
- * those resume from the start of the round on restore.
+ * dropping back into prose narration. Combatants carry the next Classic round,
+ * profiles, controllers and cooldowns. Pending manual orders and cosmetic
+ * animation are not persisted; restore presents the last accepted result.
  */
 export interface GameCombatStateSnapshot {
   party: Combatant[];
@@ -631,6 +664,9 @@ export interface CombatSummary {
     hp: number;
     maxHp: number;
     ko: boolean;
+    mp?: number;
+    maxMp?: number;
+    spellSlots?: Record<string, number>;
     statusEffects: string[];
   }>;
   enemies: Array<{

@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { agentResultTypeSchema } from "./agent.schema.js";
+import { isRulesetCatalogAssetPath, RULESET_ASSET_PATH } from "./ruleset.schema.js";
 
 /** Caps mirrored by the Marinara-Agents catalog build. Kept here so a hostile or
  *  broken notes document cannot push an unbounded string into a modal. */
 export const MAX_RELEASE_NOTE_CHARACTERS = 1000;
 export const MAX_RELEASE_NOTE_VERSIONS = 20;
 
-export const capabilityPackageKindSchema = z.enum(["agent", "maps", "conversation-calls", "turn-game"]);
+export const capabilityPackageKindSchema = z.enum(["agent", "maps", "conversation-calls", "turn-game", "ruleset"]);
 export const capabilityPermissionSchema = z.enum([
   "agent-runtime",
   "chat-read",
@@ -16,6 +17,7 @@ export const capabilityPermissionSchema = z.enum([
   "prompt-context",
   "routes",
   "storage",
+  "tools",
   "ui",
 ]);
 
@@ -223,7 +225,26 @@ const capabilityPackageManifestBaseSchema = z
 //        regardless of declared capabilityApi; declare 1.16 only to REQUIRE it. Needs `chat-write`).
 // 1.17: opted-in Experience surfaces prepare before startup and supply first-turn world context.
 // 1.18: Experience seed/default declarations in the Engine setup wizard.
-export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 18 } as const);
+// 1.19: package-contributed tools — a package holding `tools` registers a named tool through
+//        `api.registerTool`, and the engine offers it to the model alongside the built-ins on every
+//        turn, validates the call against the package's own JSON Schema, and hands the arguments to
+//        the package's handler. Not a soft seam: the API only exists on an engine this new, so a
+//        package that needs it must declare 1.19. Needs `tools`.
+// 1.20: Game Mode rulesets — a hash-pinned `ruleset.json` asset the engine validates as data and
+//        offers as a game's rules (resolution kind, character sheet, rests, GM guidance). Not a
+//        soft seam: a ruleset package is useless on an engine that cannot read it, so declaring
+//        the asset requires 1.20 and an older engine refuses the install cleanly. No permission.
+// 1.21: ruleset catalogs — a ruleset may ship collections of ready-made entries the sheet editor
+//        offers in a picker, inline in `ruleset.json` or as hash-pinned `catalogs/<id>.json`
+//        assets beside it. Not a soft seam either, for the same reason as 1.20: an engine that
+//        cannot read `catalogs` refuses the whole ruleset file, so a package that ships them
+//        declares 1.21 and an older engine refuses the install cleanly. No permission.
+// 1.22: the ruleset combat bridge — a ruleset may carry an optional `battle` block naming the live
+//        pools a fight reads as hit points, energy and slots, and the sheet lists whose
+//        catalog-marked rows become the Engine's own combat skills. Not a soft seam, for the same
+//        reason as 1.20 and 1.21: an engine that cannot read `battle` refuses the whole ruleset
+//        file, so a package that ships one declares 1.22. No permission.
+export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 22 } as const);
 
 const capabilityApiVersionSchema = z
   .object({
@@ -271,6 +292,19 @@ export const capabilityPackageManifestSchema = z
           code: z.ZodIssueCode.custom,
           path: ["contributions", "gameSurface", "setup", "config"],
           message: "Experience config cannot override the declared seed key",
+        });
+      }
+    }
+    // `registerTool` only exists on an Engine this new, so the declared API version is what stops a
+    // package shipping tools and then failing to activate on an older install. Enforced here rather
+    // than left to the documentation, which cannot refuse anything.
+    if (manifest.permissions.includes("tools")) {
+      const api = manifest.schemaVersion === 2 ? manifest.capabilityApi : null;
+      if (!api || api.major < 1 || (api.major === 1 && api.minor < 19)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["permissions"],
+          message: 'The "tools" permission requires schemaVersion 2 and capabilityApi 1.19 or newer',
         });
       }
     }
@@ -353,6 +387,39 @@ export const capabilityPackageManifestSchema = z
           code: z.ZodIssueCode.custom,
           path: ["contributions", "assets"],
           message: "contributions.assets requires schemaVersion 2 and capabilityApi 1.10 or newer",
+        });
+      }
+    }
+    // A ruleset is the whole point of the package that ships one, so it is a hard 1.20 requirement
+    // rather than a soft seam: an older Engine refuses the install instead of installing a package
+    // that then does nothing.
+    if (manifest.contributions?.assets?.paths.includes(RULESET_ASSET_PATH)) {
+      const api = manifest.schemaVersion === 2 ? manifest.capabilityApi : null;
+      if (!api || api.major < 1 || (api.major === 1 && api.minor < 20)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["contributions", "assets", "paths"],
+          message: `${RULESET_ASSET_PATH} requires schemaVersion 2 and capabilityApi 1.20 or newer`,
+        });
+      }
+    }
+    // A catalog asset is part of a ruleset, so it follows the same hard requirement one minor
+    // later, and only ever ships beside the file that declares it: on its own it is a JSON document
+    // nothing would ever read.
+    if ((manifest.contributions?.assets?.paths ?? []).some(isRulesetCatalogAssetPath)) {
+      const api = manifest.schemaVersion === 2 ? manifest.capabilityApi : null;
+      if (!api || api.major < 1 || (api.major === 1 && api.minor < 21)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["contributions", "assets", "paths"],
+          message: "catalogs/<id>.json requires schemaVersion 2 and capabilityApi 1.21 or newer",
+        });
+      }
+      if (!manifest.contributions?.assets?.paths.includes(RULESET_ASSET_PATH)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["contributions", "assets", "paths"],
+          message: `A catalog asset must ship beside the ${RULESET_ASSET_PATH} that declares it`,
         });
       }
     }
@@ -626,6 +693,8 @@ export interface CustomAgentRepository {
   lastDigest: string | null;
   lastSyncedAt: string | null;
   agentCount: number;
+  /** Game Mode rulesets the repository published under `rulesets/` at the last sync. */
+  rulesetCount: number;
 }
 
 export type CustomAgentRepositoryChangeStatus = "new" | "updated" | "unchanged" | "removed";
@@ -638,10 +707,43 @@ export interface CustomAgentRepositoryChange {
   definition?: PackagedAgentDefinition;
 }
 
+/** `new-version`: another version of this ruleset is already installed and this one joins it.
+ *  `conflict`: that exact version is installed with different contents, so it is left alone and the
+ *  author has to raise the version number. `invalid`: the file is not a usable ruleset. Both of the
+ *  last two are skipped without stopping the rest of the repository. */
+export type CustomAgentRepositoryRulesetStatus = "new" | "new-version" | "unchanged" | "conflict" | "invalid";
+
+export interface CustomAgentRepositoryRulesetChange {
+  /** The file name inside `rulesets/`, which is what identifies the row even when nothing else parsed. */
+  file: string;
+  /** The namespaced id the ruleset would be installed under, or null when the file could not be read. */
+  rulesetId: string | null;
+  name: string;
+  version: number | null;
+  status: CustomAgentRepositoryRulesetStatus;
+  /** The author's summary of what the ruleset covers, empty when the file could not be read. */
+  coverage: string;
+  /** Why an unusable file cannot be installed, first few lines only. */
+  issues: string[];
+}
+
 export interface CustomAgentRepositoryPreview {
   repository: Pick<CustomAgentRepository, "id" | "url" | "owner" | "name">;
   digest: string;
   changes: CustomAgentRepositoryChange[];
+  rulesets: CustomAgentRepositoryRulesetChange[];
+}
+
+/** What adding or syncing a repository just did with its rulesets. Stored versions are never
+ *  rewritten, so `skipped` covers both unusable files and versions already installed differently. */
+export interface CustomAgentRepositoryRulesetResult {
+  added: number;
+  unchanged: number;
+  skipped: number;
+}
+
+export interface CustomAgentRepositoryApplyResult extends CustomAgentRepository {
+  rulesets: CustomAgentRepositoryRulesetResult;
 }
 
 export interface CustomAgentRepositoryState {

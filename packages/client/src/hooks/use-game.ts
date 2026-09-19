@@ -28,6 +28,7 @@ import type {
   DiceRollResult,
   SessionSummary,
   Combatant,
+  CombatWeather,
   CombatRoundResult,
   CombatPlayerAction,
   HudWidget,
@@ -591,6 +592,7 @@ export function useSkillCheck() {
       advantage?: boolean;
       disadvantage?: boolean;
       preRolledD20?: number;
+      who?: string;
       messageId?: string;
     }) =>
       api.post<{ result: import("@marinara-engine/shared").SkillCheckResult; updatedContent?: string }>(
@@ -837,6 +839,8 @@ export function useCombatRound() {
       combatants: Array<Omit<Combatant, "sprite">>;
       round: number;
       playerAction?: CombatPlayerAction;
+      partyActions?: Record<string, CombatPlayerAction>;
+      controlledId?: string;
       mechanics?: import("@marinara-engine/shared").CombatMechanic[];
     }) => api.post<{ result: CombatRoundResult; combatants: Combatant[] }>("/game/combat/round", data),
   });
@@ -855,6 +859,7 @@ export function useTacticalCombatStart() {
       chatId: string;
       party: Combatant[];
       enemies: Combatant[];
+      weather?: CombatWeather | null;
       seed?: number;
       battlefield?: TacticalBattlefieldBrief;
       /** Blueprint scene context — themes the terrain (styleNotes.environmentType). */

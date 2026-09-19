@@ -55,7 +55,12 @@ export function validateTacticalBattlefieldBrief(value: unknown): TacticalBattle
   if (value === undefined) return { ok: true };
   if (!value || typeof value !== "object" || Array.isArray(value))
     return { ok: false, error: "Invalid battlefield brief." };
-  const source = value as { size?: unknown; features?: unknown };
+  const source = value as { size?: unknown; features?: unknown; exposure?: unknown };
+  if (
+    source.exposure !== undefined &&
+    (typeof source.exposure !== "string" || !["exposed", "sheltered", "unknown"].includes(source.exposure))
+  )
+    return { ok: false, error: "Unknown battlefield exposure." };
   if (source.size !== undefined && (typeof source.size !== "string" || !hasOwnKey(BATTLEFIELD_SIZES, source.size))) {
     return { ok: false, error: "Unknown battlefield size." };
   }
@@ -102,6 +107,7 @@ export function validateTacticalBattlefieldBrief(value: unknown): TacticalBattle
   return {
     ok: true,
     brief: {
+      ...(source.exposure ? { exposure: source.exposure as TacticalBattlefieldBrief["exposure"] } : {}),
       ...(source.size ? { size: source.size as TacticalBattlefieldSize } : {}),
       ...(features.length ? { features } : {}),
     },

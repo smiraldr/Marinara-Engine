@@ -92,7 +92,7 @@ export type TacticalStartPreferences =
   | { ok: true; seed: number; battlefield?: TacticalBattlefieldBrief }
   | { ok: false; error: string };
 
-/** Resolve setup-owned preferences before request hints; setup seed and size are authoritative. */
+/** Resolve setup-owned preferences before request hints; setup size is authoritative; obsolete setup seeds are ignored. */
 export function resolveTacticalStartPreferences(args: {
   setup: unknown;
   requestSeed: number | undefined;
@@ -118,7 +118,7 @@ export function resolveTacticalStartPreferences(args: {
   const battlefield = setup.size ? { ...(requested ?? {}), size: setup.size } : requested;
   return {
     ok: true,
-    seed: setup.seed ?? args.requestSeed ?? args.randomSeed(),
+    seed: args.requestSeed ?? args.randomSeed(),
     ...(battlefield ? { battlefield } : {}),
   };
 }

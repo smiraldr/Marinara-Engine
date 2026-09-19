@@ -12,6 +12,7 @@ import {
   parseSkillCheckTagBody,
   readGmTagAttributes,
   stripGameBranchDelimiters,
+  stripSheetCommandTags,
   type DirectionCommand,
   type DirectionEffect,
   type SkillCheckTag,
@@ -497,6 +498,7 @@ export function parseSegmentInventoryUpdates(content: string): SegmentInventoryU
     .replace(/\[party-chat\]/gi, "")
     .replace(/\[dice:\s*[^\]]+\]/gi, "");
 
+  source = stripSheetCommandTags(source);
   source = stripMapUpdateTag(source);
   source = stripBalancedTag(source, "[choices:");
 
@@ -738,6 +740,10 @@ export function parseGmTags(content: string): ParsedGmTags {
   }
   text = text.replace(/\[reputation:\s*npc="[^"]+"\s*action="[^"]+"\]/gi, "");
 
+  // The Engine resolves every sheet command and rewrites it with the outcome it actually
+  // applied, so the bookkeeping is never narration.
+  text = stripSheetCommandTags(text);
+
   // [combat: enemies="Goblin:5:40:8:5:6, Skeleton:3:25:6:3:4" allies="Dottore, Nasira"]
   // Format: Name:Level:HP:ATK:DEF:SPD — comma separated for multiple enemies
   // Simplified format: [combat: enemies="Goblin, Skeleton"] (auto-generates stats from level)
@@ -966,6 +972,9 @@ export function stripGmTags(content: string): string {
   // is not a `[name:` head at all. The prose between them is kept — a block only reaches
   // this stripper when the engine's chance pass never ran for it, and deleting narration
   // the player already read would be the worse failure.
+  // The Engine resolves every sheet command and rewrites it with the outcome it actually
+  // applied, so the bookkeeping is never narration.
+  text = stripSheetCommandTags(text);
   text = stripGameBranchDelimiters(text);
   // Quote-aware catch-all for any remaining [tag: ...] the model may invent
   text = stripUnknownBracketTags(text);
@@ -1035,6 +1044,9 @@ export function stripGmTagsKeepReadables(content: string): string {
   // is not a `[name:` head at all. The prose between them is kept — a block only reaches
   // this stripper when the engine's chance pass never ran for it, and deleting narration
   // the player already read would be the worse failure.
+  // The Engine resolves every sheet command and rewrites it with the outcome it actually
+  // applied, so the bookkeeping is never narration.
+  text = stripSheetCommandTags(text);
   text = stripGameBranchDelimiters(text);
   // Quote-aware catch-all for unknown tags, keeping Note/Book inline.
   // Case-insensitive to match extractBalancedTags (which lowercases the prefix);
@@ -1051,4 +1063,11 @@ export function stripGmTagsKeepReadables(content: string): string {
   // NOTE: [Note:] and [Book:] are intentionally kept!
   text = stripDanglingTagClosers(text);
   return text.trim();
+}
+
+/** A combat-start message arrives before the rendered game state catches up. */
+export function resolveMessageWeatherAction(state: string, content: string): "travel" | "explore" | "turn" | null {
+  const tags = parseGmTags(content);
+  if (state === "combat" || tags.stateChange === "combat" || tags.combatEncounter) return null;
+  return state === "travel_rest" ? "travel" : state === "exploration" ? "explore" : "turn";
 }

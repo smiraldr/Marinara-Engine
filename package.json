@@ -53,6 +53,7 @@
     "version:check": "node ./scripts/check-version-drift.mjs",
     "credits:sync": "node ./scripts/sync-credits.mjs",
     "credits:check": "node ./scripts/sync-credits.mjs --check",
+    "ruleset:schema": "pnpm build:shared && node ./scripts/generate-ruleset-schema.mjs",
     "backgroundremover:install": "node ./scripts/install-backgroundremover.mjs",
     "backgroundremover:reinstall": "node ./scripts/install-backgroundremover.mjs --reinstall",
     "guard:installer-artifacts": "node ./scripts/check-tracked-installers.mjs",
@@ -67,7 +68,8 @@
     "adm-zip": "^0.6.1",
     "esbuild": "^0.28.1",
     "prettier": "^3.8.3",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "zod-to-json-schema": "^3.25.2"
   },
   "pnpm": {
     "overrides": {

@@ -3264,12 +3264,19 @@ export const ChatMessage = memo(function ChatMessage({
             style={{ width: `min(${5 * vnPortraitScale}rem, 26vw)`, height: `min(${5 * vnPortraitScale}rem, 26vw)` }}
           >
             {displayAvatarUrl ? (
-              <img
-                src={displayAvatarUrl}
-                alt={displayName}
-                className="h-full w-full object-cover"
-                style={vnAvatarCropStyle}
-              />
+              <button
+                type="button"
+                className="block h-full w-full cursor-zoom-in focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--primary)]"
+                onClick={() => openImageLightbox(displayAvatarUrl)}
+                aria-label={localizeUi("ui.chat.chatmessage.openValue1Avatar", { value1: displayName })}
+              >
+                <img
+                  src={displayAvatarUrl}
+                  alt={displayName}
+                  className="h-full w-full object-cover"
+                  style={vnAvatarCropStyle}
+                />
+              </button>
             ) : (
               <div
                 className="flex h-full items-center justify-center text-[var(--muted-foreground)]"

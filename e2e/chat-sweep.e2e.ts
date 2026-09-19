@@ -1,3 +1,4 @@
+import { prepareViteFixtureDependencies } from "./vite-fixture-dependencies.js";
 import { test, expect, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { seedUIState } from "./ui-state-fixture";
@@ -693,6 +694,7 @@ test("Game translation follows changed narration and remains manually accessible
     await page.route("**/api/translate", async (route) => {
       const body = route.request().postDataJSON();
       expect(body.targetLanguage).toBe("pl");
+      expect(body.chatId).toBe(chat.id);
       requested.push(body.text);
       await route.fulfill({
         json: {
@@ -878,6 +880,7 @@ for (const mode of ["conversation", "roleplay", "game"] as const) {
       await page.goto("/");
       // The real hooks run under an isolated QueryClient so eviction can be
       // deterministic, without waiting for the inactive cache's five-minute GC.
+      await prepareViteFixtureDependencies(page);
       await page.evaluate(
         async ({ chat, metadata }) => {
           const { useGenerate } = await import("/src/hooks/use-generate.ts" as string);
@@ -886,10 +889,7 @@ for (const mode of ["conversation", "roleplay", "game"] as const) {
           const { useChatStore } = await import("/src/stores/chat.store.ts" as string);
           const { useTranslationStore } = await import("/src/stores/translation.store.ts" as string);
           const { trackChatMetadataSave } = await import("/src/lib/chat-metadata-save-barrier.ts" as string);
-          const dependencyUrl = (name: string) =>
-            performance
-              .getEntriesByType("resource")
-              .find((entry) => new URL(entry.name).pathname.endsWith(`/deps/${name}.js`))!.name;
+          const dependencyUrl = window.__viteFixtureDependencyUrl;
           const { default: React } = await import(dependencyUrl("react"));
           const { default: ReactDOM } = await import(dependencyUrl("react-dom_client"));
           const { QueryClient, QueryClientProvider } = await import(dependencyUrl("@tanstack_react-query"));
@@ -1064,6 +1064,7 @@ for (const mode of ["conversation", "roleplay", "game"] as const) {
         await page.evaluate(() => (window as any).translationFixture.settled());
         await expect.poll(() => translations.length).toBe(scenarios.indexOf(scenario) + 1);
         expect(translations.at(-1)).toMatchObject({
+          chatId: chat.id,
           text: source,
           provider: "ai",
           targetLanguage: scenario === "malformed-legacy" ? "en" : "pl",
@@ -1125,16 +1126,13 @@ test("Notification position is selectable, moves errors, and survives reload", a
   await expect(selector).toBeFocused();
   await expect(selector).toHaveValue("top");
   await selector.selectOption("bottom");
-  const error = async () =>
-    page.evaluate(async () => {
-      const moduleUrl = performance
-        .getEntriesByType("resource")
-        .map((entry) => entry.name)
-        .find((url) => new URL(url).pathname.endsWith("/sonner.js"));
-      if (!moduleUrl) throw new Error("The app's notification module was not loaded");
-      const { toast } = await import(moduleUrl);
+  const error = async () => {
+    await prepareViteFixtureDependencies(page, "/src/App.tsx");
+    await page.evaluate(async () => {
+      const { toast } = await import(window.__viteFixtureDependencyUrl("sonner"));
       toast.error("Notification position fixture", { duration: Infinity });
     });
+  };
   await error();
   await expect(page.locator('[data-sonner-toaster][data-y-position="bottom"]')).toContainText(
     "Notification position fixture",

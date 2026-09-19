@@ -3545,7 +3545,7 @@ export function useGenerate() {
                 if (
                   msg.role === "assistant" &&
                   textToTranslate &&
-                  !store.translations[id] &&
+                  (!store.translations[id] || store.translationSources[id] !== textToTranslate) &&
                   !store.hiddenTranslationIds[id]
                 ) {
                   void translateMessage(qc, id, textToTranslate, outputTranslationConfig, params.chatId).catch(

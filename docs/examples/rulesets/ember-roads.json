@@ -1,0 +1,287 @@
+{
+  "$comment": "A small example ruleset for the authoring guide. It rolls 2d6 plus a stat, to show that nothing in the format assumes a d20 or six abilities. Copy it, change the id, and make it yours.",
+  "schemaVersion": 1,
+  "id": "ember-roads",
+  "version": 1,
+  "name": "Ember Roads",
+  "edition": "Example ruleset, first draft",
+  "license": {
+    "spdx": "CC0-1.0",
+    "attribution": "Written for the Marinara Engine docs. Do what you like with it."
+  },
+  "coverage": {
+    "checks": true,
+    "saves": false,
+    "sheet": true,
+    "resources": true,
+    "rests": true,
+    "combat": false,
+    "summary": "2d6 plus a stat against a difficulty, a short sheet with Grit and Luck, and one rest."
+  },
+  "resolution": {
+    "kind": "dice-sum",
+    "dice": { "count": 2, "sides": 6 },
+    "abilityModifier": { "op": "identity" },
+    "proficiencyTiers": [
+      { "id": "untrained", "label": "Untrained" },
+      { "id": "trained", "label": "Trained", "flat": 1 },
+      { "id": "expert", "label": "Expert", "flat": 2 }
+    ],
+    "advantage": false,
+    "difficultyLadder": [
+      { "label": "Easy", "dc": 6 },
+      { "label": "Risky", "dc": 8 },
+      { "label": "Hard", "dc": 10 },
+      { "label": "Desperate", "dc": 12 }
+    ]
+  },
+  "sheet": {
+    "version": 1,
+    "sections": [
+      { "id": "about", "label": "About" },
+      { "id": "gear", "label": "Gear" },
+      { "id": "knacks", "label": "Knacks" }
+    ],
+    "abilities": [
+      { "id": "brawn", "label": "Brawn", "short": "BRN", "min": -1, "max": 3, "default": 0 },
+      { "id": "wits", "label": "Wits", "short": "WIT", "min": -1, "max": 3, "default": 0 },
+      { "id": "heart", "label": "Heart", "short": "HRT", "min": -1, "max": 3, "default": 0 }
+    ],
+    "skills": [
+      { "id": "scrap", "label": "Scrap", "ability": "brawn" },
+      { "id": "sneak", "label": "Sneak", "ability": "wits" },
+      { "id": "tinker", "label": "Tinker", "ability": "wits" },
+      { "id": "sway", "label": "Sway", "ability": "heart" }
+    ],
+    "fields": [
+      { "id": "calling", "label": "Calling", "type": "text", "maxLength": 60, "section": "about" },
+      {
+        "id": "toughness",
+        "label": "Toughness",
+        "type": "number",
+        "min": 0,
+        "max": 6,
+        "default": 2,
+        "section": "about"
+      }
+    ],
+    "derived": [
+      {
+        "id": "grit_max",
+        "label": "Grit maximum",
+        "op": "sum",
+        "of": [{ "const": 4 }, { "field": "toughness" }, { "abilityMod": "brawn" }],
+        "section": "about"
+      }
+    ],
+    "lists": [
+      {
+        "id": "gear",
+        "label": "Gear",
+        "section": "gear",
+        "maxItems": 20,
+        "columns": [
+          { "id": "name", "label": "Name", "type": "text", "maxLength": 60, "required": true },
+          { "id": "notes", "label": "Notes", "type": "text", "maxLength": 200 }
+        ]
+      },
+      {
+        "id": "knacks",
+        "label": "Knacks",
+        "section": "knacks",
+        "maxItems": 20,
+        "columns": [
+          { "id": "name", "label": "Name", "type": "text", "maxLength": 60, "required": true },
+          { "id": "notes", "label": "What it does", "type": "text", "maxLength": 200 }
+        ]
+      },
+      {
+        "$comment": "A list with pools: every row is a resource with its own maximum, and the camp rest gives back the ones that recharge there.",
+        "id": "tricks",
+        "label": "Limited tricks",
+        "section": "knacks",
+        "maxItems": 12,
+        "columns": [
+          { "id": "name", "label": "Name", "type": "text", "maxLength": 60, "required": true },
+          { "id": "uses", "label": "Uses", "type": "number", "min": 0, "max": 9, "default": 1 },
+          {
+            "id": "recharge",
+            "label": "Comes back",
+            "type": "enum",
+            "values": ["camp", "scene"],
+            "valueLabels": { "camp": "At camp", "scene": "Each scene" },
+            "default": "camp"
+          }
+        ],
+        "pools": { "nameColumn": "name", "maxColumn": "uses", "rechargeColumn": "recharge" }
+      }
+    ],
+    "live": {
+      "pools": [
+        { "id": "grit", "label": "Grit", "max": { "derived": "grit_max" } },
+        { "id": "luck", "label": "Luck", "max": { "const": 3 } }
+      ],
+      "tracks": [{ "id": "heat", "label": "Heat", "min": 0, "max": 5, "default": 0 }],
+      "conditions": [
+        { "id": "shaken", "label": "Shaken" },
+        { "id": "wounded", "label": "Wounded" }
+      ]
+    }
+  },
+  "rests": [
+    {
+      "id": "camp",
+      "label": "Make camp",
+      "restore": [
+        { "pool": "grit", "to": "max" },
+        { "pool": "luck", "by": { "const": 1 } },
+        { "track": "heat", "by": { "const": -1 } },
+        { "listPools": "tricks", "recharge": ["camp"], "to": "max" }
+      ],
+      "clear": { "conditions": ["shaken"] }
+    }
+  ],
+  "gm": {
+    "checkGuidance": "This game uses the Ember Roads rules. When the outcome of a risky action is in doubt, call for a check with one of the skills on the sheet and pick a difficulty from the ladder. The Engine rolls 2d6 and adds the numbers from the sheet. Never write the result yourself.",
+    "sheetGuidance": "The character sheets below are authoritative. Spend Grit when a character is hurt and Luck when they push a roll, and raise Heat when the party draws attention.",
+    "sheetSummary": {
+      "fields": ["calling"],
+      "derived": ["grit_max"],
+      "lists": [{ "list": "gear", "nameColumn": "name" }]
+    }
+  },
+  "catalogs": [
+    {
+      "$comment": "Ready-made knacks the sheet editor offers in a picker. Picked rows are copies the player can edit, and none of this text is ever sent to the model.",
+      "id": "knacks",
+      "label": "Knacks",
+      "feeds": ["knacks", "tricks"],
+      "filters": [
+        { "id": "grit", "label": "Grit cost", "type": "number" },
+        { "id": "road", "label": "Road", "type": "text" },
+        { "id": "callings", "label": "Calling", "type": "tags", "startFrom": { "field": "calling" } }
+      ],
+      "units": { "distance": { "label": "paces", "perCell": 2 } },
+      "entries": [
+        {
+          "id": "road-sense",
+          "label": "Road Sense",
+          "summary": "You read a road the way other people read a face.",
+          "filters": { "grit": 0, "road": "Ash Flats", "callings": ["Scout", "Courier"] },
+          "rows": [
+            {
+              "list": "knacks",
+              "values": {
+                "name": "Road Sense",
+                "notes": "Sneak to notice where a road turns bad before you are standing on it."
+              }
+            }
+          ]
+        },
+        {
+          "id": "scrap-whisper",
+          "label": "Scrap Whisper",
+          "summary": "Dead machines tell you what killed them.",
+          "filters": { "grit": 0, "road": "Rustways", "callings": ["Tinker"] },
+          "rows": [
+            {
+              "list": "knacks",
+              "values": { "name": "Scrap Whisper", "notes": "Tinker to learn what a broken thing was last used for." }
+            }
+          ]
+        },
+        {
+          "id": "iron-stomach",
+          "label": "Iron Stomach",
+          "summary": "You can eat what the road offers and keep walking.",
+          "filters": { "grit": 0, "road": "Every road", "callings": ["Hauler"] },
+          "rows": [
+            {
+              "list": "knacks",
+              "values": {
+                "name": "Iron Stomach",
+                "notes": "Ignore the first Shaken you take from bad food or foul water."
+              }
+            }
+          ]
+        },
+        {
+          "$comment": "One entry, two rows: the knack itself and the limited use that tracks it.",
+          "id": "last-ember",
+          "label": "Last Ember",
+          "summary": "Once between camps you can call a friend back from the edge.",
+          "filters": { "grit": 1, "road": "Every road", "callings": ["Ember-tender"] },
+          "rows": [
+            {
+              "list": "knacks",
+              "values": {
+                "name": "Last Ember",
+                "notes": "Spend 1 Grit to give a downed friend 3 Grit back. Once between camps."
+              }
+            },
+            { "list": "tricks", "values": { "name": "Last Ember", "uses": 1, "recharge": "camp" } }
+          ],
+          "mechanics": {
+            "kind": "heal",
+            "range": 0,
+            "targets": "ally",
+            "amount": { "flat": 3 },
+            "cost": [{ "pool": "grit", "amount": 1 }]
+          }
+        },
+        {
+          "id": "coldfire-toss",
+          "label": "Coldfire Toss",
+          "summary": "A jar of blue fire that burns cold and spreads.",
+          "filters": { "grit": 1, "road": "Glasslands", "callings": ["Ember-tender"] },
+          "rows": [
+            {
+              "list": "knacks",
+              "values": {
+                "name": "Coldfire Toss",
+                "notes": "Throw a sealed jar. Everyone near where it lands is burned, friends included."
+              }
+            }
+          ],
+          "mechanics": {
+            "kind": "attack",
+            "range": 12,
+            "area": { "shape": "burst", "size": 4 },
+            "targets": "any",
+            "friendlyFire": true,
+            "amount": { "dice": "2d6" },
+            "damageType": "coldfire"
+          }
+        },
+        {
+          "id": "hold-the-line",
+          "label": "Hold the Line",
+          "summary": "You make the people beside you braver than they are.",
+          "filters": { "grit": 0, "road": "Every road", "callings": ["Hauler", "Scout"] },
+          "rows": [
+            {
+              "list": "knacks",
+              "values": {
+                "name": "Hold the Line",
+                "notes": "Spend 1 Luck to steady the party. Clear Shaken from one ally who can hear you."
+              }
+            }
+          ],
+          "mechanics": {
+            "$comment": "This one costs Luck, which the battle block names as the energy pool, so a battle offers it and spends it. Last Ember costs Grit, which is the health pool, and a battle cannot spend hit points as energy: that knack is left out of the fight instead.",
+            "kind": "buff",
+            "range": 4,
+            "targets": "ally",
+            "cost": [{ "pool": "luck", "amount": 1 }]
+          }
+        }
+      ]
+    }
+  ],
+  "battle": {
+    "$comment": "Optional. It does not make battles follow these rules: it lends Marinara's own combat the numbers on the sheet. Grit is what a fight damages, Luck is what a knack spends, there are no slots here, and the knacks a player picked from the catalog become the skills they can use.",
+    "health": { "pool": "grit" },
+    "energy": { "pool": "luck" },
+    "skills": [{ "list": "knacks" }]
+  }
+}

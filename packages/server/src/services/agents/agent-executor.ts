@@ -25,6 +25,7 @@ import {
   DEFAULT_AGENT_MAX_TOKENS,
   DEFAULT_CUSTOM_AGENT_CONTEXT_SOURCES,
   isTrackerFieldHidden,
+  isTrackerRowsUpdate,
   MIN_AGENT_MAX_TOKENS,
   normalizeTrackerHiddenFields,
   normalizeCustomAgentCapabilities,
@@ -3512,7 +3513,13 @@ function parseAgentResponse(
       if (!parsedData || typeof parsedData !== "object" || Array.isArray(parsedData)) {
         throw new Error("Structured agent response must be a JSON object");
       }
-      const data = config.type === "cyoa" ? normalizeCyoaChoiceOutput(parsedData) : parsedData;
+      let data = config.type === "cyoa" ? normalizeCyoaChoiceOutput(parsedData) : parsedData;
+      // Custom Tracker has one row group; tolerate the incremental envelope at
+      // the root as well as under fields, then use the usual merge/lock path.
+      if (resultType === "custom_tracker_update" && isTrackerRowsUpdate(data) && !("fields" in data)) {
+        const { updates, removed } = data;
+        data = { ...data, fields: { updates, removed } };
+      }
       if (config.settings.jsonContextOutput === true && resultType === "context_injection") {
         const output = data as Record<string, unknown>;
         if (typeof output.text !== "string") throw new Error("JSON context output requires a text field");

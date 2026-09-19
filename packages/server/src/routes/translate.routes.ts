@@ -21,6 +21,7 @@ import { createReplyFallbackNotifier } from "./generate/fallback-notification.js
 const GOOGLE_MAX_LENGTH = 5000;
 
 const translateSchema = z.object({
+  chatId: z.string().optional(),
   text: z.string().min(1).max(50000),
   provider: z.enum(["ai", "deeplx", "deepl", "google"]),
   targetLanguage: z.string().trim().min(1).max(100),

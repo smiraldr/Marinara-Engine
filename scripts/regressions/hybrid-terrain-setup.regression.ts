@@ -23,22 +23,22 @@ const config: GameSetupConfig = {
 const source = { gameName: "Terrain round trip", config };
 const shared = buildGameSetupShareFile(source, "2026-09-16T00:00:00.000Z");
 const imported = parseGameSetupShareFileJson(JSON.stringify(shared));
-assert.deepEqual(imported.setup.config.tacticalBattlefield, config.tacticalBattlefield);
+assert.deepEqual(imported.setup.config.tacticalBattlefield, { size: "large" });
 i18n.addResourceBundle("en", "translation", {
   "ui.game.gamesetupsummary.auto": "Localized automatic battlefield",
   "ui.game.gamesetupsummary.sizeLarge": "Localized large battlefield",
   "ui.game.gamesetupsummary.sizeMedium": "Localized medium battlefield",
 });
 const summary = buildGameSetupSummarySections(source).flatMap((section) => section.rows);
-assert.ok(
-  summary.some((row) => String(row.value) === "0"),
-  "Seed zero is displayed rather than replaced by random",
-);
+assert.ok(!summary.some((row) => String(row.value) === "0"), "Obsolete battlefield seed is absent from the summary");
 assert.ok(
   summary.some((row) => row.value === "Localized large battlefield"),
   "The reusable summary uses the localized size label",
 );
-assert.ok(summary.some((row) => String(row.value).includes("forest clearing")));
+assert.ok(
+  !summary.some((row) => String(row.value).includes("forest clearing")),
+  "Retired creation-time guidance is not advertised as an active setting.",
+);
 
 for (const [size, expectedLabel] of [
   [undefined, "Localized automatic battlefield"],
@@ -80,15 +80,12 @@ assert.equal(parseGameSetupShareFileJson(JSON.stringify(legacy)).setup.config.ta
 const importContext = { characters: [], connections: [], lorebooks: [], personas: [], promptPresets: [] };
 const padded = structuredClone(shared);
 padded.setup.config.tacticalBattlefield = { seed: 0, instructions: "  Ruins beside the forest.  " };
-assert.deepEqual(resolveGameSetupImport(padded, importContext).config.tacticalBattlefield, {
-  seed: 0,
-  instructions: "Ruins beside the forest.",
-});
+assert.equal(resolveGameSetupImport(padded, importContext).config.tacticalBattlefield, undefined);
 padded.setup.config.tacticalBattlefield = { instructions: "   " };
 assert.equal(resolveGameSetupImport(padded, importContext).config.tacticalBattlefield, undefined);
 padded.setup.config.tacticalBattlefield = { seed: 0 };
 padded.setup.config.combatStyle = "classic";
 assert.equal(resolveGameSetupImport(padded, importContext).config.tacticalBattlefield, undefined);
 console.info(
-  "Hybrid tactical setup preserves seed zero, size and guidance; invalid imports fail and legacy setups load.",
+  "Hybrid tactical setup preserves size and retires seed and guidance; invalid imports fail and legacy setups load.",
 );

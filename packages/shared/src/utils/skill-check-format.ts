@@ -80,6 +80,8 @@ export interface SkillCheckTagExtras {
   threshold?: number;
   /** `pool="d20:1"` — the slot the engine actually spent, never the one the model claimed. */
   pool?: string;
+  /** `who="Name"` — the party member a ruleset game rolled for. Written only by that path. */
+  who?: string;
 }
 
 function serializeSkillCheckExtras(extras: SkillCheckTagExtras | undefined): string {
@@ -87,6 +89,7 @@ function serializeSkillCheckExtras(extras: SkillCheckTagExtras | undefined): str
   const parts: string[] = [];
   if (extras.threshold != null && Number.isFinite(extras.threshold)) parts.push(`threshold="${extras.threshold}"`);
   if (extras.pool) parts.push(`pool="${serializeSkillCheckAttribute(extras.pool)}"`);
+  if (extras.who) parts.push(`who="${serializeSkillCheckAttribute(extras.who)}"`);
   return parts.length > 0 ? ` ${parts.join(" ")}` : "";
 }
 
@@ -124,5 +127,5 @@ export function serializeResolvedSkillCheckTag(result: SkillCheckResult, extras?
     `mode="${result.rollMode}"`,
     `resolution="${result.resolution}"`,
     `dice="${serializeSkillCheckAttribute(result.dice ?? "1d20")}"`,
-  ].join(" ")}${serializeSkillCheckExtras(extras)}]`;
+  ].join(" ")}${serializeSkillCheckExtras(result.who && !extras?.who ? { ...extras, who: result.who } : extras)}]`;
 }

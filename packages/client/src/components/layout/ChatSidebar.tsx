@@ -2078,9 +2078,9 @@ function UserStatusFooter({
             onClick={onOpenScheduleManager}
             title={localizeUi("ui.layout.chatsidebar.characterScheduleManager")}
             aria-label={localizeUi("ui.layout.chatsidebar.characterScheduleManager")}
-            className="mari-chrome-control mari-chrome-control--small ml-1 h-7 w-7 shrink-0 justify-center p-0 max-md:h-9 max-md:min-h-9 max-md:w-9"
+            className="mari-chrome-control mari-chrome-control--small ml-1 h-7 w-7 shrink-0 justify-center p-0! max-md:h-9 max-md:min-h-9 max-md:w-9"
           >
-            <CalendarClock size="1.25rem" strokeWidth={2.25} />
+            <CalendarClock className="shrink-0" size="1.25rem" strokeWidth={2.25} />
           </button>
         )}
       </div>

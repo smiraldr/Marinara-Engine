@@ -1,3 +1,6 @@
+import { z } from "zod";
+import { resolveGameConnection as resolveEncounterConnection } from "../services/game/connection.service.js";
+import { combatAiHintsSchema, combatBossSchema, combatInterruptFields } from "@marinara-engine/shared";
 // ──────────────────────────────────────────────
 // Routes: Combat Encounter (non-streaming JSON)
 // ──────────────────────────────────────────────
@@ -13,8 +16,7 @@ import { createLLMProvider } from "../services/llm/provider-registry.js";
 import type { ChatMessage } from "../services/llm/base-provider.js";
 import { logger, logDebugOverride } from "../lib/logger.js";
 import { cardPromptText } from "../services/prompt/card-text.js";
-import { passThroughLeaf } from "../services/prompt/prompt-escaping.js";
-import { localAuthProviderBaseUrl, normalizeRpgStatPools } from "@marinara-engine/shared";
+import { normalizeRpgStatPools } from "@marinara-engine/shared";
 import {
   tacticalBattlefieldSetupSchema,
   validateTacticalEncounterBlueprint,
@@ -46,35 +48,6 @@ function configuredHpMax(rpgStats: RPGStatsConfig | undefined): number | null {
   );
   const max = Number(hpPool?.max ?? rpgStats.hp?.max);
   return Number.isFinite(max) && max > 0 ? max : null;
-}
-
-/** Resolve a connection (handles "random" pool + baseUrl fallback). */
-async function resolveConnection(
-  connections: ReturnType<typeof createConnectionsStorage>,
-  connId: string | null,
-  chatConnectionId: string | null,
-) {
-  let id = connId ?? chatConnectionId;
-  if (id === "random") {
-    const pool = await connections.listRandomPool();
-    if (!pool.length) throw new Error("No connections marked for the random pool");
-    id = pool[Math.floor(Math.random() * pool.length)].id;
-  }
-  if (!id) throw new Error("No API connection configured");
-  const conn = await connections.getWithKey(id);
-  if (!conn) throw new Error("API connection not found");
-
-  let baseUrl = conn.baseUrl;
-  if (!baseUrl) {
-    const { PROVIDERS } = await import("@marinara-engine/shared");
-    const providerDef = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
-    baseUrl = providerDef?.defaultBaseUrl ?? "";
-  }
-  const localAuthBaseUrl = localAuthProviderBaseUrl(conn.provider);
-  if (!baseUrl && localAuthBaseUrl) baseUrl = localAuthBaseUrl;
-  if (!baseUrl) throw new Error("No base URL configured for this connection");
-
-  return { conn, baseUrl };
 }
 
 /** Extract reliable JSON from an LLM response that may include markdown fences. */
@@ -337,11 +310,6 @@ function buildInitPrompt(
     system += `IMPORTANT: When generating the party's attacks, prioritize spells/abilities from the spellbook above. These are the player's known spells and custom attacks that MUST be available as attack options.\n\n`;
   }
 
-  if (tactical && tacticalBattlefield?.instructions) {
-    // User-authored prompt prose stays verbatim under the shared prompt-leaf contract.
-    system += `The player supplied these battlefield design instructions. Follow them when choosing the bounded semantic terrain brief, while keeping the generated battlefield playable:\n<battlefield_instructions>\n${passThroughLeaf(tacticalBattlefield.instructions)}\n</battlefield_instructions>\n\n`;
-  }
-
   system += `Here is the chat history before the encounter:\n<history>\n`;
   msgs.push({ role: "system", content: system });
 
@@ -391,15 +359,15 @@ function buildInitPrompt(
   inst += `    "timeOfDay": "dawn|day|dusk|night|twilight",\n`;
   inst += `    "weather": "clear|rainy|snowy|windy|stormy|overcast"\n`;
   inst += `  },\n`;
+  inst += `  "battlefield": {\n`;
+  if (tactical) inst += `    "formation": "line|ambush|surrounded|skirmish|defense",\n`;
+  inst += `    "terrainBrief": {\n`;
+  inst += `      "exposure": "exposed|sheltered|unknown"`;
   if (tactical) {
-    inst += `  "battlefield": {\n`;
-    inst += `    "formation": "line|ambush|surrounded|skirmish|defense",\n`;
-    inst += `    "terrainBrief": {\n`;
-    inst += `      "size": "small|medium|large",\n`;
-    inst += `      "features": [{"terrain":"plains|forest|mountain|ruin|water|wall","placement":"center|north|south|east|west","shape":"patch|barrier"}]\n`;
-    inst += `    }\n`;
-    inst += `  },\n`;
+    inst += `,\n      "size": "small|medium|large",\n`;
+    inst += `      "features": [{"terrain":"plains|forest|mountain|ruin|water|wall","placement":"center|north|south|east|west","shape":"patch|barrier"}]`;
   }
+  inst += `\n    }\n  },\n`;
   inst += `  "itemEffects": [\n`;
   inst += `    {"name":"Inventory item name","target":"self|ally|enemy|any","type":"heal|damage|buff|debuff|status|utility","description":"what this item does in this fight","power":0.3,"element":"optional","status":{"name":"Wet","emoji":"💧","duration":2,"modifier":-2,"stat":"defense"},"consumes":true}\n`;
   inst += `  ],\n`;
@@ -412,6 +380,13 @@ function buildInitPrompt(
   inst += `  "visuals": {"isBossFight": false, "encounterTier": "common|miniboss|boss|special", "enemyImagePrompts": [{"name":"Enemy Name","prompt":"portrait prompt"}], "backgroundPrompt": "optional boss arena background prompt", "illustrationPrompt": "optional boss fight splash illustration prompt", "slug": "optional-short-slug"}\n`;
   inst += `}\n\n`;
   inst += `IMPORTANT NOTES:\n`;
+  inst += `- For each party member and enemy, include aiHints: {category: "beast|monstrosity|other|unknown", proficiency: "novice|trained|veteran|master", temperament: "mindless|reckless|cautious|opportunistic|protective|supportive|disciplined|cowardly|patient|methodical|coordinated"}. Use established identity and training, not HP or appearance. Omit temperament when personality is unknown; do not mistake negated traits for positive evidence. Every Beast and Monstrosity is Mindless. These values are protocol enums and must not be translated.\n`;
+  inst += `- For every attack include kind: "attack|heal|buff|debuff" and a nonnegative mpCost. For every enemy include numeric mp and maxMp, preserving established resources. Otherwise give a finite pool appropriate to its skills. Class hints (fighter|knight|rogue|archer|mage|healer) may be supplied in either combat mode. Do not invent abilities to fit a temperament.\n`;
+  inst += `- Explicitly identify each actual boss enemy with boss: {points: 3, anticipation: true, attackCost: 1, defendCost: 1, moveCost: 1}; omit boss for ordinary enemies and elites. This also applies to a solo boss. Do not infer boss status from HP alone. Boss skills may have legendaryCost: 1..3 when they are appropriate additional actions.\n`;
+  inst += `- Mark actual spellcasting abilities with spell: true. For an established area attack, supply areaRadius: 1..3 and friendlyFire: true/false for Tactical; targetScope: "all-enemies" supplies explicit non-spatial group damage in Classic. Omit these for single-target spells. Only when the established kit includes one, represent an interrupting spell with reaction: "counterspell", spell: true, range: 3, and its real mpCost/cooldown. A defensive ward/interception can use reaction: "guard" with its real cost/range. Reaction-only abilities are not ordinary turn attacks. Do not give every caster Counterspell. You may supply range: 1..12 tiles for Tactical abilities. Spell slots may be supplied as spellSlots: {"3": 2} and slotLevel: 3 ONLY when established; otherwise use finite MP and omit slot fields. These are generic Engine rules, not a claim of 5e compliance.\n`;
+  inst += `- battlefield.terrainBrief.exposure: exposed only when the actual combat site is open to outdoor weather; sheltered for enclosed/covered sites; unknown if context cannot establish either. Apply this in both Classic and Tactical. Do not invent current weather.\n`;
+  inst += `- On each combatant, projectile and requiresSight are optional boolean traits of their BASIC attack. On each attack/skill, supply its own projectile/requiresSight booleans when grounded in its actual mechanics (arrows are projectiles; sight-aimed attacks require sight). These flags control weather penalties. Do not infer traits from translated names or grant weather immunity. Omitted flags receive no weather accuracy modifier.\n`;
+  inst += `- Describe the environment at THIS encounter's current location, using current scene details. Do not reuse a world-creation terrain template.\n`;
   inst += `- attacks: each has "name" and "type" (single-target, AoE, or both). Add cooldown/status/element only when useful.\n`;
   inst += `- allies: include ${personaName} and any party members or nearby NPCs clearly fighting on ${personaName}'s side. Give allies battle-specific attacks inspired by their cards/context.\n`;
   inst += `- enemies: weak enemies can have one simple attack; bosses and elites should have multiple attacks and one memorable mechanic.\n`;
@@ -597,7 +572,7 @@ export async function encounterRoutes(app: FastifyInstance) {
       const chat = await chats.getById(chatId);
       if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
-      const { conn, baseUrl } = await resolveConnection(connections, connectionId, chat.connectionId);
+      const { conn, baseUrl } = await resolveEncounterConnection(connections, connectionId, chat.connectionId);
       const provider = createLLMProvider(
         conn.provider,
         baseUrl,
@@ -701,6 +676,63 @@ export async function encounterRoutes(app: FastifyInstance) {
       if (!combatState?.party || !combatState?.enemies) {
         return reply.status(502).send({ error: "Invalid combat data returned by AI" });
       }
+      const aiBlueprintSchema = z
+        .object({
+          party: z.array(
+            z
+              .object({
+                projectile: z.boolean().optional(),
+                requiresSight: z.boolean().optional(),
+                aiHints: combatAiHintsSchema.optional(),
+                spellSlots: z.record(z.string().regex(/^[1-9]$/), z.number().int().min(0).max(100)).optional(),
+                attacks: z
+                  .array(
+                    z
+                      .object({
+                        ...combatInterruptFields,
+                        kind: z.enum(["attack", "heal", "buff", "debuff"]).optional(),
+                        mpCost: z.number().min(0).max(10000).optional(),
+                      })
+                      .passthrough(),
+                  )
+                  .optional(),
+              })
+              .passthrough(),
+          ),
+          enemies: z.array(
+            z
+              .object({
+                projectile: z.boolean().optional(),
+                requiresSight: z.boolean().optional(),
+                aiHints: combatAiHintsSchema.optional(),
+                spellSlots: z.record(z.string().regex(/^[1-9]$/), z.number().int().min(0).max(100)).optional(),
+                boss: combatBossSchema.optional(),
+                mp: z.number().min(0).max(100000).optional(),
+                maxMp: z.number().min(0).max(100000).optional(),
+                attacks: z
+                  .array(
+                    z
+                      .object({
+                        ...combatInterruptFields,
+                        kind: z.enum(["attack", "heal", "buff", "debuff"]).optional(),
+                        mpCost: z.number().min(0).max(10000).optional(),
+                      })
+                      .passthrough(),
+                  )
+                  .optional(),
+              })
+              .passthrough()
+              .refine(
+                ({ mp, maxMp }) => mp === undefined || maxMp === undefined || mp <= maxMp,
+                "Invalid resource pool.",
+              ),
+          ),
+        })
+        .passthrough();
+      const aiBlueprint = aiBlueprintSchema.safeParse(combatState);
+      if (!aiBlueprint.success)
+        return reply.status(502).send({ error: `Invalid combat AI data: ${aiBlueprint.error.issues[0]?.message}` });
+      combatState = aiBlueprint.data;
       if (combatStyle === "tactical") {
         const tacticalResult = validateTacticalEncounterBlueprint(combatState);
         if (!tacticalResult.ok) {
@@ -732,7 +764,7 @@ export async function encounterRoutes(app: FastifyInstance) {
       const chat = await chats.getById(chatId);
       if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
-      const { conn, baseUrl } = await resolveConnection(connections, connectionId, chat.connectionId);
+      const { conn, baseUrl } = await resolveEncounterConnection(connections, connectionId, chat.connectionId);
       const provider = createLLMProvider(
         conn.provider,
         baseUrl,
@@ -839,7 +871,7 @@ export async function encounterRoutes(app: FastifyInstance) {
       const chat = await chats.getById(chatId);
       if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
-      const { conn, baseUrl } = await resolveConnection(connections, connectionId, chat.connectionId);
+      const { conn, baseUrl } = await resolveEncounterConnection(connections, connectionId, chat.connectionId);
       const provider = createLLMProvider(
         conn.provider,
         baseUrl,

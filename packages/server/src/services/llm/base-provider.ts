@@ -197,7 +197,7 @@ export interface ChatOptions {
   toolChoice?: "auto" | "required";
   /** Enable provider-native prompt caching when supported */
   enableCaching?: boolean;
-  /** Anthropic only: use 1-hour prompt-cache TTL instead of the default 5-minute TTL */
+  /** Anthropic and Claude Subscription: request a 1-hour prompt-cache TTL. */
   anthropicExtendedCacheTtl?: boolean;
   /** Anthropic cache breakpoint depth from the newest message. 0 = newest message. */
   cachingAtDepth?: number;

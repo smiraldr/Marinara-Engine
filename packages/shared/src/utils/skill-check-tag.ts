@@ -57,6 +57,12 @@ export interface SkillCheckTag {
    * rule cannot see. An unreadable name costs the tag a `slot` mismatch instead.
    */
   poolDeclared?: boolean;
+  /**
+   * `who=` as the GM wrote it: the party member a ruleset game rolls the check for. Absent means
+   * the player. Carried, never judged: only a game with a pinned ruleset reads it, and whether
+   * the name matches a sheet is the resolver's business.
+   */
+  who?: string;
   /** `pool=` exactly as written, for the mismatch log. Present whenever `poolDeclared` is. */
   poolRaw?: string;
   /**
@@ -320,6 +326,8 @@ export function parseSkillCheckTagBody(body: string): SkillCheckTag | null {
     const threshold = Number(values.get("threshold"));
     if (Number.isFinite(threshold)) tag.threshold = threshold;
   }
+  const who = values.get("who")?.trim();
+  if (who) tag.who = who.slice(0, 100);
   if (values.has("pool")) {
     tag.poolDeclared = true;
     tag.poolRaw = values.get("pool")!;

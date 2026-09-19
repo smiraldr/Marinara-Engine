@@ -38,7 +38,9 @@ Every import shows the Agent's requested capabilities before it is stored. Permi
 
 Custom repositories are disabled by default because their prompts and tool selections are unvetted third-party content. Set `ENABLE_CUSTOM_AGENT_REPOS=true`, enable **Allow custom Agent imports** in the Danger Zone, then open **Agents → Download Agents → Custom Sources** to preview a public GitHub repository. Adding a source and applying any later content change both require explicit confirmation. Synchronization is manual; Marinara does not clone repositories or poll them in the background.
 
-The repository root must contain an `agents.json` array using the same agent-definition format as downloadable agent packages. A minimal file looks like this:
+A repository may publish agents, Game Mode rulesets, or both. It needs at least one of them.
+
+The repository root may contain an `agents.json` array using the same agent-definition format as downloadable agent packages. A minimal file looks like this:
 
 ```json
 [
@@ -54,7 +56,11 @@ The repository root must contain an `agents.json` array using the same agent-def
 ]
 ```
 
-Marinara accepts GitHub repository-root URLs only and validates the bounded archive plus every agent definition before showing the preview. During synchronization, remote prompt, settings, and tool values replace the repository-managed values shown in that preview. Connection and artwork choices remain local. If an agent disappears upstream, Marinara keeps it as a normal local custom agent and removes only its repository link. Removing a source follows the same keep-local policy.
+The repository root may also contain a `rulesets` folder holding one Game Mode ruleset per `.json` file, up to 32 files of 256 KB each. Only files directly inside `rulesets` are read, so anything in a subfolder is ignored. Each ruleset is listed in the preview with its name, version, and what it covers. A ruleset's Game Master text is sent to the model in every game that uses it, so only install rulesets from people you trust.
+
+An imported ruleset is named after the repository owner, such as `alice/my-5e`, so it can never take an official ruleset's name and two authors can both publish a ruleset called `v20`. Every imported version is kept and a game always plays on the exact version it was created on. If the same version arrives again with different contents, Marinara keeps the installed one and tells you to ask the author to raise the version number. A file Marinara cannot read is listed with the reason and skipped; the rest of the repository still installs.
+
+Marinara accepts GitHub repository-root URLs only and validates the bounded archive plus every agent definition before showing the preview. During synchronization, remote prompt, settings, and tool values replace the repository-managed values shown in that preview. Connection and artwork choices remain local. If an agent disappears upstream, Marinara keeps it as a normal local custom agent and removes only its repository link. Removing a source follows the same keep-local policy, and rulesets it supplied stay installed so games pinned to them keep working.
 
 ### External Extensions
 

@@ -146,6 +146,21 @@ for (const theme of ["dark", "light"] as const) {
       await input.blur();
       await expect(page.getByRole("img", { name: /full.*sprite/i })).toBeVisible();
       await page.screenshot({ path: info.outputPath(`vn-${theme}.png`), animations: "disabled" });
+      const portrait = vn.getByRole("button", { name: "Open Mari avatar", exact: true });
+      await expect(portrait).toBeVisible();
+      await portrait.focus();
+      if (info.project.name.includes("mobile")) await portrait.tap();
+      else await portrait.press("Enter");
+      const preview = page.getByRole("dialog", { name: "Image preview", exact: true });
+      await expect(preview).toBeVisible();
+      await expect(preview.locator("img")).toHaveAttribute(
+        "src",
+        (await vn.getByRole("img", { name: "Mari", exact: true }).getAttribute("src")) ?? "",
+      );
+      await page.screenshot({ path: info.outputPath(`vn-portrait-${theme}.png`), animations: "disabled" });
+      await preview.getByRole("button", { name: "Close image", exact: true }).click();
+      await expect(preview).toHaveCount(0);
+      await expect(input).toHaveValue("An unsent response stays here.");
       const bubble = await vn.boundingBox();
       const composer = await input.boundingBox();
       expect(bubble!.y + bubble!.height).toBeLessThanOrEqual(composer!.y + 1);
